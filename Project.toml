@@ -1,0 +1,21 @@
+name = "FlowTransformBindings"
+uuid = "73c6b5d6-1010-4337-8b9e-d550f02c124c"
+version = "0.1.0"
+authors = ["Jordan Benjamin <jordantbenjamin@gmail.com>"]
+
+[workspace]
+projects = ["test"]
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+
+[weakdeps]
+FastTransforms = "057dd010-8810-581a-b7be-e3fc3b93f78c"
+
+[extensions]
+FlowTransformBindingsFastTransformsExt = "FastTransforms"
+
+[compat]
+FastTransforms = "0.17"
+Libdl = "1"
+julia = "1.11"
