@@ -1,6 +1,11 @@
 using FlowTransformBindings: FlowTransformBindings as FTB   # before FastTransforms loads its OpenMP runtime
 using FastSphericalHarmonics: FastSphericalHarmonics as FSH
 using FastTransforms: FastTransforms
+using FFTW: FFTW
+using FINUFFT: FINUFFT
+using NonuniformFFTs: NonuniformFFTs
+using JLArrays: JLArrays
+using SpectralBackends: SpectralBackends as SB
 using Aqua: Aqua
 using LinearAlgebra: LinearAlgebra
 using Random: Random
@@ -23,7 +28,7 @@ function coefficient_sets(n::Int, seed::Int)
     end
 end
 
-const TOPICS = ["fasttransforms_guard"]
+const TOPICS = ["fasttransforms_guard", "nufft"]
 
 Test.@testset "FlowTransformBindings" begin
     for topic in (isempty(ARGS) ? TOPICS : ARGS)
