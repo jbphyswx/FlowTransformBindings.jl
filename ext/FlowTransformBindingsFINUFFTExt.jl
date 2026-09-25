@@ -8,15 +8,70 @@ using FINUFFT: FINUFFT
 
 The FINUFFT type-1 and type-2 plans over nodes the handle owns. FINUFFT keeps pointers to the node
 vectors, so they stay unchanged between `set_nodes!` calls. Real values run through complex plans
-on the half of axis 1 (`FTB._HalfWork`).
+on the half of axis 1 (`FTB._HalfWork`). `lock` is the lock the plans' C code takes around its FFTW
+calls: `FINUFFT.finufftlock[]` when they were made.
 """
-mutable struct FINUFFTPlan{T, D, R, S<:FTB.NUFFTSpec{D,R}, P, W} <: FTB.AbstractNUFFTPlan{T,D}
+mutable struct FINUFFTPlan{T, D, R, S<:FTB.NUFFTSpec{D,R}, P, W, L} <: FTB.AbstractNUFFTPlan{T,D}
     const spec::S
     nodes::NTuple{D,Vector{R}}
     const type1::P
     const type2::P
     work::W
     closed::Bool
+    const lock::L
+end
+
+# FINUFFT's destructor takes `lock`, which a finalizer may not wait for. A finalizer destroys a plan when
+# it acquires the lock at once and otherwise queues it, and every call here that takes the lock empties
+# the queue afterwards.
+const _DEFERRED = FINUFFTPlan[]
+const _DEFERRED_LOCK = ReentrantLock()
+
+function _destroy!(p::FINUFFTPlan)
+    FINUFFT.finufft_destroy!(p.type1)
+    FINUFFT.finufft_destroy!(p.type2)
+    p.closed = true
+    return nothing
+end
+
+function _finalize(p::FINUFFTPlan)
+    p.closed && return nothing
+    # A finalizer may not yield, so the queue's lock is spun for; the lock is held only briefly.
+    while !trylock(_DEFERRED_LOCK)
+        GC.safepoint()
+    end
+    try
+        if trylock(p.lock)
+            try
+                _destroy!(p)
+            finally
+                unlock(p.lock)
+            end
+        else
+            push!(_DEFERRED, p)
+        end
+    finally
+        unlock(_DEFERRED_LOCK)
+    end
+    return nothing
+end
+
+function _destroy_deferred()
+    lock(_DEFERRED_LOCK)
+    try
+        filter!(_DEFERRED) do p
+            trylock(p.lock) || return true
+            try
+                _destroy!(p)
+            finally
+                unlock(p.lock)
+            end
+            return false
+        end
+    finally
+        unlock(_DEFERRED_LOCK)
+    end
+    return nothing
 end
 
 function FTB._allocate_nodes(::FTB.FINUFFTBackend, ::Type{R}, M::Int, like::AbstractVector) where {R}
@@ -28,6 +83,7 @@ end
 function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,Vector{R}}) where {T,D,R}
     ms = collect(Int64, FTB._mode_size(T, spec.nmodes))
+    lk = FINUFFT.finufftlock[]
     type1 = _makeplan(1, ms, spec.iflag, spec)
     type2 = try
         _makeplan(2, ms, -spec.iflag, spec)
@@ -36,8 +92,11 @@ function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
         rethrow()
     end
     work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
-    p = FINUFFTPlan{T,D,R,typeof(spec),typeof(type1),typeof(work)}(spec, nodes, type1, type2, work, false)
+    p = FINUFFTPlan{T,D,R,typeof(spec),typeof(type1),typeof(work),typeof(lk)}(spec, nodes, type1, type2, work,
+                                                                             false, lk)
+    finalizer(_finalize, p)
     _setpts!(p)
+    _destroy_deferred()
     return p
 end
 
@@ -64,7 +123,9 @@ function FTB._set_nodes!(p::FINUFFTPlan)
             p.work = FTB._half_work(first(p.nodes), p.spec)
         end
     end
-    return _setpts!(p)
+    _setpts!(p)
+    _destroy_deferred()
+    return p
 end
 
 FTB._backend(::FINUFFTPlan) = FTB.FINUFFTBackend()
@@ -79,8 +140,8 @@ FTB._type2!(values, p::FINUFFTPlan{<:Real}, modes) =
     FTB._half_type2!(values, p.work, modes, p.spec.order, p.type2)
 
 function FTB._close!(p::FINUFFTPlan)
-    FINUFFT.finufft_destroy!(p.type1)
-    FINUFFT.finufft_destroy!(p.type2)
+    _destroy!(p)
+    _destroy_deferred()
     return nothing
 end
 

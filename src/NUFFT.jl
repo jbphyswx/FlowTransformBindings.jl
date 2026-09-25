@@ -189,6 +189,13 @@ The number of fields each execution transforms.
 ntrans(p::AbstractNUFFTPlan) = p.spec.ntrans
 
 """
+    nthreads(plan) -> Int
+
+The thread count the plan's library runs at.
+"""
+nthreads(p::AbstractNUFFTPlan) = p.spec.nthreads
+
+"""
     tolerance(plan) -> R
 
 The relative accuracy the plan requested of its library.
@@ -291,7 +298,9 @@ end
 """
     close!(plan) -> nothing
 
-Release the library's resources. Idempotent; a closed plan refuses to execute.
+Release the library's resources now. Idempotent; a closed plan refuses to execute. A plan left
+unreachable has its host resources released at collection, and a cuFINUFFT plan its device resources
+only by this.
 """
 function close!(p::AbstractNUFFTPlan)
     p.closed && return nothing

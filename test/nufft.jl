@@ -199,6 +199,7 @@ Test.@testset "NonuniformFFTs on Threads.nthreads() threads" begin
     xs, ys = nu_nodes(rng, Float64, 200, L, o)
     p = FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, (16, 12); period = L, origin = o,
                        nthreads = Threads.nthreads())
+    Test.@test FTB.nthreads(p) == Threads.nthreads()
     e1, e2 = nu_errors(p, ys, rng)
     Test.@test e1 < 10 * FTB.tolerance(p)
     Test.@test e2 < 10 * FTB.tolerance(p)
@@ -215,6 +216,7 @@ Test.@testset "Plan lifecycle and checks: $(nameof(typeof(backend)))" for backen
     xs = (rand(Random.Xoshiro(6), 30) .* 2π,)
     p = FTB.plan_nufft(backend, ComplexF64, xs, (12,); tol = 1e-30)
     Test.@test FTB.tolerance(p) == eps(Float64)
+    Test.@test FTB.nthreads(p) == 1
     p32 = FTB.plan_nufft(backend, Float32, map(x -> Float32.(x), xs), (12,); tol = 1e-30)
     Test.@test FTB.tolerance(p32) == eps(Float32)
     FTB.close!(p32)
@@ -232,6 +234,36 @@ Test.@testset "Plan lifecycle and checks: $(nameof(typeof(backend)))" for backen
     Test.@test_throws ArgumentError FTB.nufft_type1!(F, p, c)
     Test.@test_throws ArgumentError FTB.set_nodes!(p, xs)
     Test.@test_throws ArgumentError FTB.task_local_plan(p)
+end
+
+# A FINUFFT plan left unreachable is destroyed by its finalizer: at once when the lock its C code takes
+# is free, and otherwise queued and destroyed by the next call here that takes the lock.
+Test.@testset "FINUFFT plans are freed by collection" begin
+    ext = Base.get_extension(FTB, :FlowTransformBindingsFINUFFTExt)
+    xs = (rand(Random.Xoshiro(20), 40) .* 2π,)
+    freed(p) = FTB.isclosed(p) && p.type1.plan_ptr == C_NULL && p.type2.plan_ptr == C_NULL
+    p = FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,))
+    ext._finalize(p)
+    Test.@test freed(p)
+    Test.@test FTB.close!(p) === nothing
+
+    q = FTB.plan_nufft(FTB.FINUFFTBackend(), Float64, xs, (8,))
+    locked, release = Channel{Nothing}(1), Channel{Nothing}(1)
+    holder = Threads.@spawn (lock(q.lock); put!(locked, nothing); take!(release); unlock(q.lock))
+    take!(locked)
+    ext._finalize(q)
+    Test.@test !FTB.isclosed(q) && any(r -> r === q, ext._DEFERRED)
+    put!(release, nothing)
+    wait(holder)
+    FTB.close!(FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,)))
+    Test.@test freed(q) && isempty(ext._DEFERRED)
+
+    for _ in 1:50
+        FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,))
+    end
+    GC.gc()
+    FTB.close!(FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,)))
+    Test.@test isempty(ext._DEFERRED)
 end
 
 # FINUFFT holds the transform count at runtime, so one plan type serves every `ntrans`, real values
