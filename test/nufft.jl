@@ -12,22 +12,22 @@ nu_axis_freqs(::Type{T}, order, ns) where {T} =
 nu_phase(freqs, I, ys, j) = sum(freqs[d][I[d]] * ys[d][j] for d in eachindex(ys))
 
 # Type 1 of the `M × B` values `c`: modes of size `(length.(freqs)..., B)`.
-function nu_type1(ys, c::AbstractMatrix, freqs)
+function nu_type1(ys, c::AbstractMatrix, freqs, iflag::Int = -1)
     F = zeros(ComplexF64, map(length, freqs)..., size(c, 2))
     for b in axes(c, 2), I in CartesianIndices(map(length, freqs)), j in axes(c, 1)
-        F[I, b] += c[j, b] * cis(-nu_phase(freqs, I, ys, j))
+        F[I, b] += c[j, b] * cis(iflag * nu_phase(freqs, I, ys, j))
     end
     return F
 end
 
 # Type 2 of the modes `F` (trailing batch axis): the complex series, or the real one with weight 2 on
 # every row k₁ > 0.
-function nu_type2(ys, F, freqs, isreal::Bool)
+function nu_type2(ys, F, freqs, isreal::Bool, iflag::Int = -1)
     D = length(ys)
     c = zeros(ComplexF64, length(ys[1]), size(F, D + 1))
     for b in axes(c, 2), I in CartesianIndices(map(length, freqs)), j in axes(c, 1)
         w = (isreal && freqs[1][I[1]] > 0) ? 2 : 1
-        c[j, b] += w * F[I, b] * cis(nu_phase(freqs, I, ys, j))
+        c[j, b] += w * F[I, b] * cis(-iflag * nu_phase(freqs, I, ys, j))
     end
     return isreal ? real.(c) : c
 end
@@ -45,12 +45,13 @@ nu_box(D) = (ntuple(d -> 3.7 + d, D), ntuple(d -> -1.2 * d, D))
 function nu_errors(p::FTB.AbstractNUFFTPlan{T,D}, ys, rng) where {T,D}
     R, B = real(T), FTB.ntrans(p)
     freqs = nu_axis_freqs(T, p.spec.order, FTB.nmodes(p))
+    s = p.spec.iflag
     c = randn(rng, T, size(FTB.allocate_values(p)))
     F = FTB.nufft_type1!(FTB.allocate_modes(p), p, c)
-    e1 = relerr(vec(F), vec(nu_type1(ys, reshape(ComplexF64.(c), :, B), freqs)))
+    e1 = relerr(vec(F), vec(nu_type1(ys, reshape(ComplexF64.(c), :, B), freqs, s)))
     G = randn(rng, Complex{R}, size(F))
     v = FTB.nufft_type2!(FTB.allocate_values(p), p, G)
-    e2 = relerr(vec(v), vec(nu_type2(ys, reshape(ComplexF64.(G), FTB.mode_size(p)..., B), freqs, T <: Real)))
+    e2 = relerr(vec(v), vec(nu_type2(ys, reshape(ComplexF64.(G), FTB.mode_size(p)..., B), freqs, T <: Real, s)))
     return e1, e2
 end
 
@@ -73,7 +74,8 @@ end
 Test.@testset "Type 1 and type 2 equal the direct sums: $(nameof(typeof(backend)))" for backend in NU_BACKENDS
     rng = Random.Xoshiro(1)
     for T in (ComplexF64, Float64, ComplexF32, Float32), order in (FTB.CenteredModes(), FTB.FFTModes()),
-        (ns, M) in (((17,), 40), ((16,), 40), ((12, 9), 70), ((6, 5, 8), 60)), B in (1, 3)
+        (ns, M) in (((17,), 40), ((16,), 40), ((3,), 20), ((12, 9), 70), ((4, 3), 30), ((6, 5, 8), 60)),
+        B in (1, 3)
         L, o = nu_box(length(ns))
         xs, ys = nu_nodes(rng, real(T), M, L, o)
         p = FTB.plan_nufft(backend, T, xs, ns; ntrans = B, order, period = L, origin = o)
@@ -84,6 +86,57 @@ Test.@testset "Type 1 and type 2 equal the direct sums: $(nameof(typeof(backend)
         Test.@test e2 < 10 * FTB.tolerance(p)
         FTB.close!(p)
     end
+end
+
+# `iflag = +1` reaches FINUFFT as its own sign and NonuniformFFTs as the reflected nodes.
+Test.@testset "iflag = +1 equals the direct sums: $(nameof(typeof(backend)))" for backend in NU_BACKENDS
+    rng = Random.Xoshiro(15)
+    for T in (ComplexF64, Float64), order in (FTB.CenteredModes(), FTB.FFTModes()),
+        (ns, M) in (((16,), 40), ((12, 9), 70)), B in (1, 3)
+        L, o = nu_box(length(ns))
+        xs, ys = nu_nodes(rng, real(T), M, L, o)
+        p = FTB.plan_nufft(backend, T, xs, ns; ntrans = B, order, period = L, origin = o, iflag = 1)
+        e1, e2 = nu_errors(p, ys, rng)
+        Test.@test e1 < 10 * FTB.tolerance(p)
+        Test.@test e2 < 10 * FTB.tolerance(p)
+        xs2, ys2 = nu_nodes(rng, real(T), M + 7, L, o)
+        FTB.set_nodes!(p, xs2)
+        e1, e2 = nu_errors(p, ys2, rng)
+        Test.@test e1 < 10 * FTB.tolerance(p)
+        Test.@test e2 < 10 * FTB.tolerance(p)
+        FTB.close!(p)
+    end
+    Test.@test_throws ArgumentError FTB.plan_nufft(backend, ComplexF64, (rand(5),), (4,); iflag = 2)
+end
+
+# Each returned mode is the oversampled spectrum at its frequency times `normfactor / Π phis`, and the
+# spectrum also holds `+n/2` on an even axis.
+Test.@testset "NonuniformFFTs oversampled spectra reproduce the returned modes" begin
+    rng = Random.Xoshiro(16)
+    L, o = nu_box(2)
+    xs, ys = nu_nodes(rng, Float64, 90, L, o)
+    ns = (10, 8)
+    p = FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, ns; order = FTB.FFTModes(), period = L,
+                       origin = o)
+    c = randn(rng, 90)
+    F = FTB.nufft_type1!(FTB.allocate_modes(p), p, c)
+    us, nf, phis = FTB.oversampled_spectra(p)
+    u = first(us)
+    Ñ2 = size(u, 2)
+    ovs(k, n) = k >= 0 ? k + 1 : n + k + 1
+    f2 = nu_freqs(FTB.FFTModes(), ns[2])
+    Test.@test all(CartesianIndices(F)) do I
+        k1, k2 = I[1] - 1, f2[I[2]]
+        isapprox(F[I], nf * u[k1 + 1, ovs(k2, Ñ2)] / (phis[1][I[1]] * phis[2][I[2]]); rtol = 1e-12)
+    end
+    # `+n₂/2` against the direct sum, deconvolved with the factor of its partner `-n₂/2`, which the
+    # even kernel shares.
+    j = findfirst(==(-(ns[2] ÷ 2)), f2)
+    twin = [nf * u[k1 + 1, ovs(ns[2] ÷ 2, Ñ2)] / (phis[1][k1 + 1] * phis[2][j]) for k1 in 0:(ns[1] ÷ 2)]
+    ref = [sum(c[m] * cis(-(k1 * ys[1][m] + (ns[2] ÷ 2) * ys[2][m])) for m in eachindex(c)) for k1 in 0:(ns[1] ÷ 2)]
+    Test.@test relerr(twin, ref) < 10 * FTB.tolerance(p)
+    Test.@test_throws ArgumentError FTB.oversampled_spectra(
+        FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, ns; period = L, origin = o))
 end
 
 Test.@testset "Type 1 is the adjoint of type 2: $(nameof(typeof(backend)))" for backend in NU_BACKENDS

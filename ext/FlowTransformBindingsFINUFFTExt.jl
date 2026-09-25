@@ -28,9 +28,9 @@ end
 function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,Vector{R}}) where {T,D,R}
     ms = collect(Int64, FTB._mode_size(T, spec.nmodes))
-    type1 = _makeplan(1, ms, -1, spec)
+    type1 = _makeplan(1, ms, spec.iflag, spec)
     type2 = try
-        _makeplan(2, ms, 1, spec)
+        _makeplan(2, ms, -spec.iflag, spec)
     catch
         FINUFFT.finufft_destroy!(type1)
         rethrow()

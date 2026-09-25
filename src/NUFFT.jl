@@ -51,8 +51,8 @@ end
 
 The library-independent part of a plan: mode counts `nmodes` in `order`, the `period` and `origin`
 of the box each coordinate is folded into, the tolerance `tol`, the transform count `ntrans`, the
-library thread count `nthreads` and the oversampling factor `upsampfac` (`nothing` for the
-library's own).
+library thread count `nthreads`, the oversampling factor `upsampfac` (`nothing` for the library's
+own) and `iflag`, the sign of `i` in the type-1 exponent.
 """
 struct NUFFTSpec{D, R<:AbstractFloat, O<:AbstractModeOrder, U<:Union{Nothing,Float64}}
     nmodes::NTuple{D,Int}
@@ -63,6 +63,7 @@ struct NUFFTSpec{D, R<:AbstractFloat, O<:AbstractModeOrder, U<:Union{Nothing,Flo
     ntrans::Int
     nthreads::Int
     upsampfac::U
+    iflag::Int
 end
 
 """
@@ -85,33 +86,42 @@ default_tolerance(::Type{Float32}) = 1.0f-6
 """
     plan_nufft(backend, T, nodes, nmodes; ntrans = 1, tol = default_tolerance(real(T)),
                order = CenteredModes(), period = 2π, origin = 0, nthreads = 1,
-               upsampfac = nothing) -> AbstractNUFFTPlan{T,D}
+               upsampfac = nothing, iflag = -1) -> AbstractNUFFTPlan{T,D}
 
 A plan for the nonuniform FFTs between the `M` points `nodes = (x₁, …, x_D)` and the Fourier modes
 `nmodes = (n₁, …, n_D)`, `ntrans` fields at a time:
 
-    type 1 (points → modes):  F_k = Σⱼ cⱼ exp(-i k⋅yⱼ)
-    type 2 (modes → points):  cⱼ = Σ_k F_k exp(+i k⋅yⱼ)
+    type 1 (points → modes):  F_k = Σⱼ cⱼ exp(iflag · i k⋅yⱼ)
+    type 2 (modes → points):  cⱼ = Σ_k F_k exp(-iflag · i k⋅yⱼ)
 
-with `yⱼ = 2π (xⱼ - origin) / period` on each axis (`period` and `origin` are numbers or
-`D`-tuples), and `k` over the frequencies of `order` on each axis. Type 1 is the adjoint of
+with `iflag = ±1`, `yⱼ = 2π (xⱼ - origin) / period` on each axis (`period` and `origin` are numbers
+or `D`-tuples), and `k` over the frequencies of `order` on each axis. Type 1 is the adjoint of
 type 2. For real `T`, axis 1 holds `k₁ = 0, …, ⌊n₁/2⌋` ascending and type 2 evaluates
-`cⱼ = Re Σ_k w(k₁) F_k exp(i k⋅yⱼ)`, `w(0) = 1`, `w(k₁ > 0) = 2`, so each row `k₁ > 0` also
-stands for its conjugate at `-k`; type 1 is then the adjoint under the inner product weighted by
-`w`. `tol` is raised to `eps(real(T))`; `nthreads` is the library's own thread count.
+`cⱼ = Re Σ_k w(k₁) F_k exp(-iflag · i k⋅yⱼ)`, `w(0) = 1`, `w(k₁ > 0) = 2`, so each row `k₁ > 0`
+also stands for its conjugate at `-k`; type 1 is then the adjoint under the inner product weighted
+by `w`. `tol` is raised to `eps(real(T))`; `nthreads` is the library's own thread count.
 """
 function plan_nufft(backend::SB.AbstractNUFFTSpectralBackend, ::Type{T},
                     nodes::NTuple{D,AbstractVector{<:Real}}, nmodes::NTuple{D,Integer};
                     ntrans::Integer = 1, tol::Real = default_tolerance(real(T)),
                     order::AbstractModeOrder = CenteredModes(), period = 2π, origin = 0,
-                    nthreads::Integer = 1,
-                    upsampfac::Union{Nothing,Real} = nothing) where {T<:_NUFFTEltype, D}
-    spec = _spec(real(T), Val(D), nmodes, order, period, origin, tol, ntrans, nthreads, upsampfac)
+                    nthreads::Integer = 1, upsampfac::Union{Nothing,Real} = nothing,
+                    iflag::Integer = -1) where {T<:_NUFFTEltype, D}
+    spec = _spec(real(T), Val(D), nmodes, order, period, origin, tol, ntrans, nthreads, upsampfac, iflag)
     M = _npoints_of(nodes)
     buf = ntuple(_ -> _allocate_nodes(backend, real(T), M, first(nodes)), Val(D))
-    _fold_nodes!(buf, nodes, spec)
+    _fold_nodes!(buf, nodes, spec, _node_sign(backend, spec))
     return _build(backend, T, spec, buf)
 end
+
+"""
+    _node_sign(backend, spec) -> ±1
+
+The sign the nodes are folded with. A library that takes `iflag` gets the nodes as they are; one whose
+type 1 is fixed at `exp(-i k⋅y)` takes `iflag = +1` as the nodes `-y`, since
+`exp(i k⋅y) = exp(-i k⋅(-y))`.
+"""
+_node_sign(::SB.AbstractNUFFTSpectralBackend, ::NUFFTSpec) = 1
 
 plan_nufft(::SB.AbstractNUFFTSpectralBackend, ::Type{T}, nodes::Tuple, nmodes::Tuple; kwargs...) where {T} =
     throw(ArgumentError("plan_nufft takes one of Float32, Float64, ComplexF32, ComplexF64, and as many " *
@@ -119,7 +129,8 @@ plan_nufft(::SB.AbstractNUFFTSpectralBackend, ::Type{T}, nodes::Tuple, nmodes::T
                         "$(length(nmodes)) mode counts"))
 
 function _spec(::Type{R}, ::Val{D}, nmodes, order, period, origin, tol, ntrans, nthreads,
-               upsampfac) where {R,D}
+               upsampfac, iflag) where {R,D}
+    abs(iflag) == 1 || throw(ArgumentError("iflag must be +1 or -1; got $iflag"))
     1 <= D <= 3 || throw(ArgumentError("nonuniform FFTs take 1, 2 or 3 coordinates; got $D"))
     all(>=(1), nmodes) || throw(ArgumentError("mode counts must be positive; got $nmodes"))
     ntrans >= 1 || throw(ArgumentError("ntrans must be at least 1; got $ntrans"))
@@ -132,7 +143,7 @@ function _spec(::Type{R}, ::Val{D}, nmodes, order, period, origin, tol, ntrans, 
     s = upsampfac === nothing ? nothing : Float64(upsampfac)
     (s === nothing || s > 1) || throw(ArgumentError("upsampfac must exceed 1; got $upsampfac"))
     return NUFFTSpec(ntuple(d -> Int(nmodes[d]), Val(D)), order, L, o, max(R(tol), eps(R)),
-                     Int(ntrans), Int(nthreads), s)
+                     Int(ntrans), Int(nthreads), s, Int(iflag))
 end
 
 _per_axis(::Type{R}, x::Real, ::Val{D}) where {R,D} = ntuple(_ -> R(x), Val(D))
@@ -147,11 +158,11 @@ function _npoints_of(nodes::Tuple)
     return M
 end
 
-@inline _fold(x::Real, o::R, L::R) where {R} = (r = (R(x) - o) / L; R(2π) * (r - floor(r)))
+@inline _fold(x::Real, o::R, L::R, s::Int) where {R} = (r = s * (R(x) - o) / L; R(2π) * (r - floor(r)))
 
-function _fold_nodes!(dest::NTuple{D}, src::NTuple{D}, spec::NUFFTSpec{D}) where {D}
+function _fold_nodes!(dest::NTuple{D}, src::NTuple{D}, spec::NUFFTSpec{D}, s::Int) where {D}
     foreach(dest, src, spec.origin, spec.period) do y, x, o, L
-        y .= _fold.(x, o, L)
+        y .= _fold.(x, o, L, s)
     end
     return dest
 end
@@ -236,7 +247,7 @@ _zeros(like::AbstractArray, ::Type{T}, dims::Tuple) where {T} = fill!(similar(li
 """
     nufft_type1!(modes, plan, values) -> modes
 
-Type 1, points to modes: `modes[k] = Σⱼ values[j] exp(-i k⋅yⱼ)`, one field per column of `values`.
+Type 1, points to modes: `modes[k] = Σⱼ values[j] exp(iflag · i k⋅yⱼ)`, one field per column of `values`.
 """
 function nufft_type1!(modes::AbstractArray, p::AbstractNUFFTPlan, values::AbstractArray)
     _check_open(p)
@@ -249,8 +260,8 @@ end
 """
     nufft_type2!(values, plan, modes) -> values
 
-Type 2, modes to points: `values[j] = Σ_k modes[k] exp(+i k⋅yⱼ)` (the real series for real values),
-one field per trailing index of `modes`.
+Type 2, modes to points: `values[j] = Σ_k modes[k] exp(-iflag · i k⋅yⱼ)` (the real series for real
+values), one field per trailing index of `modes`.
 """
 function nufft_type2!(values::AbstractArray, p::AbstractNUFFTPlan, modes::AbstractArray)
     _check_open(p)
@@ -272,7 +283,7 @@ function set_nodes!(p::AbstractNUFFTPlan{T,D}, nodes::NTuple{D,AbstractVector{<:
     if M != npoints(p)
         p.nodes = ntuple(_ -> _allocate_nodes(_backend(p), real(T), M, first(p.nodes)), Val(D))
     end
-    _fold_nodes!(p.nodes, nodes, p.spec)
+    _fold_nodes!(p.nodes, nodes, p.spec, _node_sign(_backend(p), p.spec))
     _set_nodes!(p)
     return p
 end
@@ -307,6 +318,17 @@ other arguments, derived without building a plan: `P` itself where the library h
 count at runtime.
 """
 plan_type(::Type{P}, ::Integer) where {P<:AbstractNUFFTPlan} = P
+
+"""
+    oversampled_spectra(plan) -> (spectra, normfactor, phis)
+
+The oversampled type-1 spectra the plan's last execution computed, one per transform, in FFT order,
+together with the factors that turn them into the returned modes: the mode at output index `I` is
+`normfactor / Π_d phis[d][I_d]` times the spectrum entry at its frequency. The spectra hold frequencies
+the returned modes do not, such as `+n_d/2` on an even axis. The next execution overwrites them.
+Defined for a NonuniformFFTs plan of real values in `FFTModes` order.
+"""
+function oversampled_spectra end
 
 function Base.show(io::IO, p::AbstractNUFFTPlan{T,D}) where {T,D}
     print(io, nameof(typeof(p)), "{", T, ", ", D, "}(", npoints(p), " points, modes ", nmodes(p),
@@ -363,7 +385,7 @@ _preserving_fftw_threads(f) = _ext_loaded(:FlowTransformBindingsFFTWExt) ? _fftw
 
 # ── Real values on a library that transforms complex values only ────────────────────────────────────
 # The frequencies k₁ = 0 … ⌊n₁/2⌋ are the centered block of n = n₁ ÷ 2 + 1 modes shifted by s = n ÷ 2:
-# type 1 multiplies the values by exp(-i s y₁), type 2 its complex result by exp(+i s y₁).
+# type 1 multiplies the values by exp(iflag · i s y₁), type 2 its complex result by exp(-iflag · i s y₁).
 # Under `CenteredModes` library row i holds k₁ = i - 1. Under `FFTModes` library rows 1:c hold
 # k₁ = s … n - 1 and rows c + 1:n hold k₁ = 0 … s - 1, with c = n - s.
 #
@@ -375,6 +397,7 @@ struct _HalfWork{R, P<:AbstractVector{Complex{R}}, CV<:AbstractArray{Complex{R}}
     values::CV
     modes::CM
     shift::Int
+    iflag::Int
 end
 
 function _half_work(like::AbstractVector{R}, spec::NUFFTSpec{D,R}) where {D,R}
@@ -383,11 +406,12 @@ function _half_work(like::AbstractVector{R}, spec::NUFFTSpec{D,R}) where {D,R}
     ms = _mode_size(R, spec.nmodes)
     values = similar(like, C, M, B)
     modes = similar(like, C, (ms..., B))
-    w = _HalfWork(similar(like, C, M), values, modes, first(ms) ÷ 2)
+    w = _HalfWork(similar(like, C, M), values, modes, first(ms) ÷ 2, spec.iflag)
     return _set_phase!(w, like)
 end
 
-_set_phase!(w::_HalfWork{R}, y1::AbstractVector{R}) where {R} = (w.phase .= cis.(-R(w.shift) .* y1); w)
+_set_phase!(w::_HalfWork{R}, y1::AbstractVector{R}) where {R} =
+    (w.phase .= cis.(R(w.iflag * w.shift) .* y1); w)
 
 _npoints(w::_HalfWork) = length(w.phase)
 

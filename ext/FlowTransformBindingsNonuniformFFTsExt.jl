@@ -22,13 +22,18 @@ _ka_backend(like::AbstractArray) = FTB._is_device(like) ? NonuniformFFTs.KA.get_
 FTB._allocate_nodes(::FTB.NonuniformFFTsBackend, ::Type{R}, M::Int, like::AbstractVector) where {R} =
     NonuniformFFTs.KA.allocate(_ka_backend(like), R, M)
 
+# NonuniformFFTs' type 1 is fixed at `exp(-i k⋅y)`: its forward FFT, `NonuniformFFTs.jl`, `_type1_fft!`.
+FTB._node_sign(::FTB.NonuniformFFTsBackend, spec::FTB.NUFFTSpec) = -spec.iflag
+
 # Half-support of NonuniformFFTs' backwards Kaiser–Bessel kernel for accuracy `tol` at oversampling
 # `σ`. Its shape β = πm(2 - 1/σ) (Potts & Steidl 2003, as NonuniformFFTs documents) sets the aliasing
 # error ε ≈ exp(-√(β² - (πm/σ)²)) = exp(-2πm √(1 - 1/σ)).
-function _halfsupport(tol::Real, σ::Float64)
-    m = ceil(Int, -log(Float64(tol)) / (2π * sqrt(1 - 1 / σ)))
-    return NonuniformFFTs.HalfSupport(max(m, 2))
-end
+_halfsupport_count(tol::Real, σ::Float64) = max(ceil(Int, -log(Float64(tol)) / (2π * sqrt(1 - 1 / σ))), 2)
+_halfsupport(tol::Real, σ::Float64) = NonuniformFFTs.HalfSupport(_halfsupport_count(tol, σ))
+
+# NonuniformFFTs needs `σ·n ≥ 2m` on every axis. Where the kernel for `tol` at σ = 2 does not fit the
+# smallest axis, σ rises until it does; the half-support needed at the larger σ is no wider.
+_default_upsampfac(tol::Real, nmodes::Tuple) = max(2.0, 2 * _halfsupport_count(tol, 2.0) / minimum(nmodes))
 
 # On the host NonuniformFFTs spreads over blocks of points on `Threads.nthreads()` threads, or serially
 # with blocking off.
@@ -43,7 +48,7 @@ end
 function FTB._build(::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}}
     backend = _ka_backend(first(nodes))
-    σ = spec.upsampfac === nothing ? 2.0 : spec.upsampfac
+    σ = spec.upsampfac === nothing ? _default_upsampfac(spec.tol, spec.nmodes) : spec.upsampfac
     kw = (; ntransforms = Val(spec.ntrans), m = _halfsupport(spec.tol, σ), σ,
             fftshift = spec.order isa FTB.CenteredModes, sort_points = NonuniformFFTs.True(), backend)
     blocked = _blocked(backend, spec.nthreads)
@@ -70,6 +75,16 @@ FTB._type2!(values, p::NonuniformFFTsPlan{T,D,R,B}, modes) where {T,D,R,B} =
     NonuniformFFTs.exec_type2!(_fields(values, Val(1), Val(B)), p.plan, _fields(modes, Val(D), Val(B)))
 
 FTB._close!(::NonuniformFFTsPlan) = nothing
+
+# `copy_deconvolve_to_non_oversampled!` writes `normfactor / Π ϕ̂s[d][I_d] · ûs[index_map(I)]`, with
+# `normfactor = Π 2π/Ñ_d` over the oversampled grid `us`.
+function FTB.oversampled_spectra(p::NonuniformFFTsPlan{<:Real})
+    p.spec.order isa FTB.FFTModes || throw(ArgumentError(
+        "oversampled_spectra reads a plan in FFTModes order; this one is in $(nameof(typeof(p.spec.order)))"))
+    data = p.plan.data
+    normfactor = prod(Ñ -> 2π / Ñ, size(first(data.us)))
+    return data.ûs, normfactor, map(NonuniformFFTs.fourier_coefficients, p.plan.kernels)
+end
 
 # `PlanNUFFT` carries the transform count as its type parameter 3, and again inside its data and block
 # types (its parameters 10 and 11): each holds the count as its own parameter 3, and per-transform

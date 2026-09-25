@@ -31,9 +31,9 @@ FTB._allocate_nodes(::FTB.FINUFFTBackend, ::Type{R}, M::Int, ::CUDA.AnyCuVector)
 function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,V}) where {T,D,R,V<:CUDA.CuVector{R}}
     ms = collect(Int64, FTB._mode_size(T, spec.nmodes))
-    p1 = _makeplan(1, ms, -1, spec)
+    p1 = _makeplan(1, ms, spec.iflag, spec)
     p2 = try
-        _makeplan(2, ms, 1, spec)
+        _makeplan(2, ms, -spec.iflag, spec)
     catch
         FINUFFT.cufinufft_destroy!(p1.plan)
         rethrow()
