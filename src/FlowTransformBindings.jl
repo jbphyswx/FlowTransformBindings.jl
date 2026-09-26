@@ -7,6 +7,8 @@ qualified names.
 - [`plan_nufft`](@ref): nonuniform FFTs in 1, 2 or 3 dimensions through [`FINUFFTBackend`](@ref) or
   [`NonuniformFFTsBackend`](@ref), with [`nufft_type1!`](@ref), [`nufft_type2!`](@ref),
   [`set_nodes!`](@ref), [`close!`](@ref) and [`task_local_plan`](@ref).
+- [`lsmr!`](@ref): least squares by LSMR for stacks of right-hand sides sharing one operator, such as a
+  [`NUFFTOperator`](@ref) over a plan or a [`FunctionOperator`](@ref).
 - [`with_fasttransforms_threads`](@ref): FastTransforms calls at a chosen OpenMP thread count, safe to
   make from Julia tasks. Its methods live in the FastTransforms extension.
 """
@@ -17,6 +19,8 @@ using SpectralBackends: SpectralBackends as SB
 
 include("Tags.jl")
 include("NUFFT.jl")
+include("LSMR.jl")
+include("NUFFTOperator.jl")
 include("FastTransformsGuard.jl")
 
 function __init__()
