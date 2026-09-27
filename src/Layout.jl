@@ -141,18 +141,17 @@ slot, where `cos(n x / 2)` has zero derivative on the grid.
 @inline derivative_wavenumber(a::AbstractVector, i::Integer) = is_nyquist(a, i) ? zero(eltype(a)) : a[i]
 
 """
-    fold_weight(axis, i) -> T
+    fold_weight(axis, i) -> Int
 
 The count of full-spectrum modes that stored index `i` stands for: 2 on an interior index of a halved
 axis, 1 at its `k = 0` and Nyquist slots and everywhere on a full axis. A sum over the full spectrum of a
 function even under `k ↦ -k` equals the sum over the stored modes weighted by it.
 """
-@inline fold_weight(a::RFFTAxis{T}, i::Integer) where {T} =
-    (i == 1 || (iseven(a.n) && i == a.n ÷ 2 + 1)) ? one(T) : T(2)
-@inline fold_weight(a::AbstractVector, ::Integer) = one(eltype(a))
+@inline fold_weight(a::RFFTAxis, i::Integer) = (i == 1 || (iseven(a.n) && i == a.n ÷ 2 + 1)) ? 1 : 2
+@inline fold_weight(::AbstractVector, ::Integer) = 1
 
 """
-    mode_fold(ks, I) -> T
+    mode_fold(ks, I) -> Int
 
 [`fold_weight`](@ref) of mode `I`, read on axis 1. `I` may carry batch indices after the spectral ones.
 """
@@ -268,7 +267,11 @@ no Nyquist slot.
 @inline twin_slice_shape(ms::NTuple{D, Int}, mask::Int) where {D} =
     ntuple(e -> in_nyquist_mask(mask, e) ? (iseven(ms[e]) ? 1 : 0) : packed_size(ms, Val(true))[e], Val(D))
 
-# Index of integer frequency `kv` on an axis of length `Ñ` in FFT order; on a halved axis 1, `kv + 1`.
+"""
+    ovs_index(kv, Ñ) -> Int
+
+The index of integer frequency `kv` on an axis of length `Ñ` in FFT order, `kv + 1` on a halved axis.
+"""
 @inline ovs_index(kv::Int, Ñ::Int) = kv >= 0 ? kv + 1 : Ñ + kv + 1
 
 # Index into a table even in `k`, sampled at the frequencies of an `N`-mode axis: an even full axis

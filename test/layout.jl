@@ -188,6 +188,20 @@ Test.@testset "layout" begin
             exact = _coarse_coefficients(real.([_trig_eval(û, t) * _trig_eval(v̂, t) for t in xf]), n)
             Test.@test ŵ ≈ keep_f .* exact rtol = 1e-12 atol = 1e-14
         end
+        # The kept band is the widest alias-free one: the grid reads a sum `s = p + q` of kept modes as
+        # `s − n round(s/n)`, and at `K + 1` some out-of-band sum lands inside the band.
+        function alias_free(n, K)
+            for p in -K:K, q in -K:K
+                s = p + q
+                img = s - n * round(Int, s / n)
+                abs(s) > K && abs(img) <= K && img != s && return false
+            end
+            return true
+        end
+        for n in 4:40
+            K = FTB.dealias_cutoff(n)
+            Test.@test alias_free(n, K) && !alias_free(n, K + 1)
+        end
     end
 
     Test.@testset "3/2 padding makes the product exact on every mode" begin
