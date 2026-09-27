@@ -228,24 +228,24 @@ struct _LSMRTolerances{T<:AbstractFloat}
     noise::T
 end
 
-# The scalars of one column (Fong & Saunders §§2–5).
+# The scalars of one column, in the notation of Fong & Saunders §§2–5.
 struct _LSMRState{T<:AbstractFloat}
-    alphabar::T
-    rho::T
-    rhobar::T
-    cbar::T
-    sbar::T
-    zeta::T
-    zetabar::T
-    betadd::T        # ‖r‖ estimate, §3.3
-    betad::T
-    rhodold::T
-    tautildeold::T
-    thetatilde::T
+    ᾱ::T
+    ρ::T
+    ρ̄::T
+    c̄::T
+    s̄::T
+    ζ::T
+    ζ̄::T
+    β̈::T             # ‖r‖ estimate, §3.3
+    β̇::T
+    ρ̇old::T
+    τ̃old::T
+    θ̃::T
     d::T
     normA2::T        # Σ (α² + β²)
-    maxrbar::T
-    minrbar::T
+    maxρ̄::T
+    minρ̄::T
     normb::T
     normar0::T       # ‖A†b‖
     normr::T
@@ -257,73 +257,72 @@ struct _LSMRState{T<:AbstractFloat}
 end
 
 # The state after the first bidiagonalization step, `β₁ = ‖b‖`, `α₁ = ‖A†b‖/β₁`.
-function _lsmr_init(alpha::T, beta::T) where {T<:AbstractFloat}
-    normar = alpha * beta
+function _lsmr_init(α::T, β::T) where {T<:AbstractFloat}
+    normar = α * β
     status = iszero(normar) ? LSMR_ZERO : LSMR_RUNNING
-    return _LSMRState{T}(alpha, one(T), one(T), one(T), zero(T), zero(T), normar,
-                         beta, zero(T), one(T), zero(T), zero(T), zero(T),
-                         alpha * alpha, zero(T), T(Inf), beta, normar,
-                         beta, normar, alpha, one(T), 0, status)
+    return _LSMRState{T}(α, one(T), one(T), one(T), zero(T), zero(T), normar,
+                         β, zero(T), one(T), zero(T), zero(T), zero(T),
+                         α * α, zero(T), T(Inf), β, normar,
+                         β, normar, α, one(T), 0, status)
 end
 
-# One iteration on this iteration's bidiagonalization norms `alpha`, `beta`: the new state and the
-# coefficients of `hbar ← h + chbar hbar`, `x ← x + cx hbar`, `h ← v + ch h`.
-function _lsmr_step(st::_LSMRState{T}, alpha::T, beta::T, tol::_LSMRTolerances{T}) where {T}
-    chat, shat, alphahat = _sym_ortho(st.alphabar, tol.damp)
-    rhoold = st.rho
-    c, s, rho = _sym_ortho(alphahat, beta)
-    thetanew = s * alpha
-    alphabar = c * alpha
-    rhobarold = st.rhobar
-    zetaold = st.zeta
-    thetabar = st.sbar * rho
-    rhotemp = st.cbar * rho
-    cbar, sbar, rhobar = _sym_ortho(rhotemp, thetanew)
-    zeta = cbar * st.zetabar
-    zetabar = -sbar * st.zetabar
+# One iteration on this iteration's bidiagonalization norms `α`, `β`: the new state and the
+# coefficients of `h̄ ← h + ch̄ h̄`, `x ← x + cx h̄`, `h ← v + ch h`.
+function _lsmr_step(st::_LSMRState{T}, α::T, β::T, tol::_LSMRTolerances{T}) where {T}
+    ĉ, ŝ, α̂ = _sym_ortho(st.ᾱ, tol.damp)
+    ρold = st.ρ
+    c, s, ρ = _sym_ortho(α̂, β)
+    θnew = s * α
+    ᾱ = c * α
+    ρ̄old = st.ρ̄
+    ζold = st.ζ
+    θ̄ = st.s̄ * ρ
+    ρtemp = st.c̄ * ρ
+    c̄, s̄, ρ̄ = _sym_ortho(ρtemp, θnew)
+    ζ = c̄ * st.ζ̄
+    ζ̄ = -s̄ * st.ζ̄
     iters = st.iters + 1
 
     # The bidiagonalization terminated, so the iterate is exact and the coefficients below divide by
-    # zero; `beta = 0` means the data lie in the range of `A`.
-    if iszero(rho) || iszero(rhobar)
-        status = iszero(beta) ? LSMR_RESIDUAL : LSMR_OPTIMAL
-        normr = iszero(beta) ? zero(T) : st.normr
-        return (_LSMRState{T}(alphabar, rho, rhobar, cbar, sbar, zeta, zetabar, st.betadd, st.betad,
-                              st.rhodold, st.tautildeold, st.thetatilde, st.d, st.normA2, st.maxrbar,
-                              st.minrbar, st.normb, st.normar0, normr, abs(zetabar), st.normA,
-                              st.condA, iters, status), zero(T), zero(T), zero(T))
+    # zero; `β = 0` means the data lie in the range of `A`.
+    if iszero(ρ) || iszero(ρ̄)
+        status = iszero(β) ? LSMR_RESIDUAL : LSMR_OPTIMAL
+        normr = iszero(β) ? zero(T) : st.normr
+        return (_LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, st.β̈, st.β̇, st.ρ̇old, st.τ̃old, st.θ̃, st.d,
+                              st.normA2, st.maxρ̄, st.minρ̄, st.normb, st.normar0, normr, abs(ζ̄),
+                              st.normA, st.condA, iters, status), zero(T), zero(T), zero(T))
     end
 
-    chbar = -(thetabar * rho / (rhoold * rhobarold))
-    cx = zeta / (rho * rhobar)
-    ch = -(thetanew / rho)
+    ch̄ = -(θ̄ * ρ / (ρold * ρ̄old))
+    cx = ζ / (ρ * ρ̄)
+    ch = -(θnew / ρ)
 
-    betaacute = chat * st.betadd
-    betacheck = -shat * st.betadd
-    betahat = c * betaacute
-    betadd = -s * betaacute
-    thetatildeold = st.thetatilde
-    ctildeold, stildeold, rhotildeold = _sym_ortho(st.rhodold, thetabar)
-    thetatilde = stildeold * rhobar
-    rhodold = ctildeold * rhobar
-    betad = -stildeold * st.betad + ctildeold * betahat
-    tautildeold = (zetaold - thetatildeold * st.tautildeold) / rhotildeold
-    taud = (zeta - thetatilde * tautildeold) / rhodold
-    d = st.d + betacheck * betacheck
-    normr = sqrt(d + (betad - taud)^2 + betadd^2)
+    β́ = ĉ * st.β̈
+    β̌ = -ŝ * st.β̈
+    β̂ = c * β́
+    β̈ = -s * β́
+    θ̃old = st.θ̃
+    c̃old, s̃old, ρ̃old = _sym_ortho(st.ρ̇old, θ̄)
+    θ̃ = s̃old * ρ̄
+    ρ̇old = c̃old * ρ̄
+    β̇ = -s̃old * st.β̇ + c̃old * β̂
+    τ̃old = (ζold - θ̃old * st.τ̃old) / ρ̃old
+    τ̇ = (ζ - θ̃ * τ̃old) / ρ̇old
+    d = st.d + β̌ * β̌
+    normr = sqrt(d + (β̇ - τ̇)^2 + β̈^2)
 
-    normA2 = st.normA2 + beta * beta
+    normA2 = st.normA2 + β * β
     normA = sqrt(normA2)
-    normA2 += alpha * alpha
-    maxrbar = max(st.maxrbar, rhobarold)
-    minrbar = st.iters == 0 ? st.minrbar : min(st.minrbar, rhobarold)
-    condA = max(maxrbar, rhotemp) / min(minrbar, rhotemp)
-    normar = abs(zetabar)
+    normA2 += α * α
+    maxρ̄ = max(st.maxρ̄, ρ̄old)
+    minρ̄ = st.iters == 0 ? st.minρ̄ : min(st.minρ̄, ρ̄old)
+    condA = max(maxρ̄, ρtemp) / min(minρ̄, ρtemp)
+    normar = abs(ζ̄)
 
     status = _lsmr_status(normr, normar, normA, condA, st.normb, st.normar0, tol)
-    return (_LSMRState{T}(alphabar, rho, rhobar, cbar, sbar, zeta, zetabar, betadd, betad, rhodold,
-                          tautildeold, thetatilde, d, normA2, maxrbar, minrbar, st.normb, st.normar0,
-                          normr, normar, normA, condA, iters, status), chbar, cx, ch)
+    return (_LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, β̈, β̇, ρ̇old, τ̃old, θ̃, d, normA2, maxρ̄, minρ̄,
+                          st.normb, st.normar0, normr, normar, normA, condA, iters, status),
+            ch̄, cx, ch)
 end
 
 # The tests of Fong & Saunders §6 in their order of precedence, the later assignment winning, with the
@@ -360,7 +359,7 @@ struct LSMRWorkspace{T<:AbstractFloat, D<:AbstractArray, R<:AbstractArray, C<:Ab
     x::D
     v::D
     h::D
-    hbar::D
+    h̄::D
     u::R
     c1::C
     c2::C
@@ -369,8 +368,8 @@ struct LSMRWorkspace{T<:AbstractFloat, D<:AbstractArray, R<:AbstractArray, C<:Ab
     c2_host::VT
     c3_host::VT
     norm2::VT
-    alpha::VT
-    beta::VT
+    α::VT
+    β::VT
     states::VLSMRST
     perm::VI
     status::VLSMRS
@@ -436,21 +435,21 @@ function lsmr!(X, op, b::AbstractArray, ws::LSMRWorkspace{T}; maxiter::Integer,
         throw(ArgumentError("tolerances, conlim and damp must be nonnegative"))
     tol = _LSMRTolerances{T}(T(damp), T(atol), T(btol), conlim > 0 ? inv(T(conlim)) : zero(T),
                              T(rtol), T(noise))
-    x, v, h, hbar, u = ws.x, ws.v, ws.h, ws.hbar, ws.u
+    x, v, h, h̄, u = ws.x, ws.v, ws.h, ws.h̄, ws.u
 
     copyto!(u, b)
     lsmr_range_norm2!(ws.norm2, op, u, B)
-    _normalizers!(ws.beta, ws, B)
+    _normalizers!(ws.β, ws, B)
     colscale!(u, ws.c1, B, B)
     lsmr_adjoint!(v, op, u, nothing, B)
     lsmr_domain_norm2!(ws.norm2, op, v, B)
-    _normalizers!(ws.alpha, ws, B)
+    _normalizers!(ws.α, ws, B)
     colscale!(v, ws.c1, B, B)
     fill!(x, zero(eltype(x)))
-    fill!(hbar, zero(eltype(hbar)))
+    fill!(h̄, zero(eltype(h̄)))
     copyto!(h, v)
     @inbounds for k in 1:B
-        ws.states[k] = _lsmr_init(ws.alpha[k], ws.beta[k])
+        ws.states[k] = _lsmr_init(ws.α[k], ws.β[k])
         ws.perm[k] = k
     end
 
@@ -458,30 +457,30 @@ function lsmr!(X, op, b::AbstractArray, ws::LSMRWorkspace{T}; maxiter::Integer,
     iter = 0
     while n > 0 && iter < maxiter
         iter += 1
-        _scaled!(ws.c1, ws.c1_host, ws.alpha, -one(T), n)
+        _scaled!(ws.c1, ws.c1_host, ws.α, -one(T), n)
         lsmr_forward!(u, op, v, ws.c1, n)
         lsmr_range_norm2!(ws.norm2, op, u, n)
-        _normalizers!(ws.beta, ws, n)
+        _normalizers!(ws.β, ws, n)
         colscale!(u, ws.c1, n, B)
 
-        _scaled!(ws.c1, ws.c1_host, ws.beta, -one(T), n)
+        _scaled!(ws.c1, ws.c1_host, ws.β, -one(T), n)
         lsmr_adjoint!(v, op, u, ws.c1, n)
         lsmr_domain_norm2!(ws.norm2, op, v, n)
-        _normalizers!(ws.alpha, ws, n)
+        _normalizers!(ws.α, ws, n)
         colscale!(v, ws.c1, n, B)
 
         @inbounds for k in 1:n
-            st, chbar, cx, ch = _lsmr_step(ws.states[k], ws.alpha[k], ws.beta[k], tol)
+            st, ch̄, cx, ch = _lsmr_step(ws.states[k], ws.α[k], ws.β[k], tol)
             ws.states[k] = st
-            ws.c1_host[k] = chbar
+            ws.c1_host[k] = ch̄
             ws.c2_host[k] = cx
             ws.c3_host[k] = ch
         end
         _to_device!(ws.c1, ws.c1_host)
         _to_device!(ws.c2, ws.c2_host)
         _to_device!(ws.c3, ws.c3_host)
-        colxpby!(hbar, h, ws.c1, n, B)
-        colaxpy!(x, ws.c2, hbar, n, B)
+        colxpby!(h̄, h, ws.c1, n, B)
+        colaxpy!(x, ws.c2, h̄, n, B)
         colxpby!(h, v, ws.c3, n, B)
         n = _retire!(X, op, ws, n, LSMR_RUNNING)
     end
@@ -508,8 +507,8 @@ function _scaled!(c, h::AbstractVector{T}, src::AbstractVector{T}, s::T, n::Int)
 end
 
 # Write out each stopped column among the first `n`, taking `fallback` as the status of a running one,
-# and move the rest to the front with their vectors, state and `alpha`; `perm[s]` is the caller's column
-# in slot `s`, and swapping keeps `perm` a permutation of `1:B`.
+# and move the rest to the front with their vectors, state and `α`; `perm[s]` is the caller's column in
+# slot `s`, and swapping keeps `perm` a permutation of `1:B`.
 function _retire!(X, op, ws::LSMRWorkspace, n::Int, fallback::LSMRStatus)
     B = length(ws.perm)
     w = 0
@@ -524,12 +523,12 @@ function _retire!(X, op, ws::LSMRWorkspace, n::Int, fallback::LSMRStatus)
         end
         w += 1
         if w != s
-            for A in (ws.x, ws.v, ws.h, ws.hbar)
+            for A in (ws.x, ws.v, ws.h, ws.h̄)
                 colcopy!(A, w, A, s, B)
             end
             colcopy!(ws.u, w, ws.u, s, B)
             ws.states[w] = st
-            ws.alpha[w] = ws.alpha[s]
+            ws.α[w] = ws.α[s]
             ws.perm[w], ws.perm[s] = ws.perm[s], ws.perm[w]
         end
     end
