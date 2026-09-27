@@ -25,6 +25,34 @@ FTB.close!(p); FTB.close!(q)
 
 `benchmark/nufft_libraries.jl` times both libraries over a range of point counts.
 
+## Packed layout
+
+A real field's transform stores axis 1 halved, `k₁ = 0, …, ⌊n₁/2⌋`, and every other axis whole in FFT
+order. `RFFTAxis` and `FFTAxis` are those axes, as vectors of wavenumbers computed from the index; the
+layout supplies the weights that sum the half as the full spectrum (`mode_fold`, `fold_weights`), the
+zero derivative at an even axis's Nyquist slot (`derivative_wavenumber`), the `NyquistTwin` values a grid
+not sampled periodically needs to unpack (`unpacked!`), and the dealiasing cutoffs and exact padding of
+pseudospectral products (`dealias_cutoff`, `padded_length`, `PaddedMaps`).
+
+```julia
+ks = FTB.wavenumber_axes((Lx, Ly), (nx, ny), Val(true))   # (RFFTAxis, FFTAxis)
+E = sum(I -> FTB.mode_fold(ks, I) * abs2(û[I]), CartesianIndices(û))   # Σ |û|² over the full spectrum
+```
+
+## Least squares
+
+`FlowTransformBindings.lsmr!(X, op, b, ws; maxiter, rtol, …)` solves `min ‖b - A x‖` by LSMR for every
+column of `b` at once, applying `A` and `A†` through the operator `op`: a `FunctionOperator` of two
+functions, a `NUFFTOperator` over a NUFFT plan (type 2 with type 1 its adjoint), or any type with the
+`lsmr_forward!` / `lsmr_adjoint!` methods. `LSMRWorkspace(op)` holds the iteration and each column's
+outcome, and is reused across solves.
+
+```julia
+op = FTB.NUFFTOperator(p)                      # fit Fourier modes to scattered samples `c`
+F = FTB.allocate_modes(p)
+FTB.lsmr!(F, op, c, FTB.LSMRWorkspace(op); maxiter = 100, rtol = 1e-10)
+```
+
 ## FastTransforms from Julia tasks
 
 `FlowTransformBindings.with_fasttransforms_threads(f, n)` calls `f()` with FastTransforms' OpenMP thread

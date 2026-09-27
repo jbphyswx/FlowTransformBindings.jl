@@ -26,6 +26,27 @@ include("LSMR.jl")
 include("NUFFTOperator.jl")
 include("FastTransformsGuard.jl")
 
+public FINUFFTBackend, NonuniformFFTsBackend, is_available, has_real_transform
+public AbstractModeOrder, CenteredModes, FFTModes, mode_frequency, AbstractNUFFTPlan, default_tolerance,
+       plan_nufft, npoints, nmodes, ntrans, nthreads, tolerance, isclosed, mode_size, mode_frequencies,
+       allocate_values, allocate_modes, nufft_type1!, nufft_type2!, set_nodes!, close!, task_local_plan,
+       plan_type, oversampled_spectra
+public AbstractWavenumberAxis, RFFTAxis, FFTAxis, wavenumber_axes, full_length, full_size, spectral_size,
+       packed_size, is_halved, max_abs, is_nyquist, derivative_wavenumber, fold_weight, mode_fold,
+       fold_weights, neg_index, NyquistTwin, twin_at, axis_twin, with_twin, nyquist_mask, in_nyquist_mask,
+       n_twin_slices, twin_slice_shape, ovs_index, twin_table, ConjTwinSlice, conj_twins,
+       gather_conj_twins!, hermitian_request_size, publish_packed!, packed_half_view, unpacked!, unpacked,
+       wavenumber_arrays, dealias_cutoff, is_dealiased, dealias_factors, padded_length, padded_images,
+       padded_preimage, padded_axes, padded_derivative_wavenumbers, PaddedMaps, padded_embed!,
+       padded_truncate!
+public LSMRStatus, LSMR_RUNNING, LSMR_ZERO, LSMR_RESIDUAL, LSMR_OPTIMAL, LSMR_NOISE, LSMR_PRECISION,
+       LSMR_CONDITION, LSMR_MAXITER, isconverged, LSMRWorkspace, lsmr!, lsmr_ncolumns,
+       lsmr_allocate_domain, lsmr_allocate_range, lsmr_forward!, lsmr_adjoint!, lsmr_range_norm2!,
+       lsmr_domain_norm2!, lsmr_write!, lsmr_check_solution, colnorm2!, colscale!, colaxpy!, colxpby!,
+       colcopy!, FunctionOperator, lsmr_precondition!, lsmr_precondition_adjoint!, RightPreconditioned,
+       DiagonalPreconditioner, NUFFTOperator
+public FASTTRANSFORMS_THREADS, with_fasttransforms_threads
+
 function __init__()
     _init_gtid_mode!()
     return nothing
