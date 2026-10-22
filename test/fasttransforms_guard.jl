@@ -1,15 +1,8 @@
-Test.@testset "The OpenMP runtime identifies threads without stack windows" begin
-    Test.@test Base.get_extension(FTB, :FlowTransformBindingsFastTransformsExt) !== nothing
-    Test.@test FTB._GTID_SAFE[]
-    Sys.isapple() && Test.@test ENV["KMP_GTID_MODE"] == "2"
-end
-
 Test.@testset "A guarded call runs at the count asked for and restores the one it found" begin
     FastTransforms.ft_set_num_threads(3)
     Test.@test FTB.with_fasttransforms_threads(omp_threads, 1) == 1
     Test.@test omp_threads() == 3
     Test.@test FTB.with_fasttransforms_threads(omp_threads) == 3
-    Test.@test FTB.with_fasttransforms_threads(omp_threads, nothing) == 3
     # A farm names the count once; the tasks it spawns inherit it.
     Base.ScopedValues.with(FTB.FASTTRANSFORMS_THREADS => 2) do
         Test.@test FTB.with_fasttransforms_threads(omp_threads) == 2

@@ -38,10 +38,14 @@ function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
         FINUFFT.cufinufft_destroy!(p1.plan)
         rethrow()
     end
-    work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
-    p = CuFINUFFTPlan{T,D,R,typeof(spec),V,typeof(p1),typeof(work)}(spec, nodes, p1, p2, work, false)
-    _setpts!(p)
-    return p
+    return try
+        work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
+        _setpts!(CuFINUFFTPlan{T,D,R,typeof(spec),V,typeof(p1),typeof(work)}(spec, nodes, p1, p2, work, false))
+    catch
+        FINUFFT.cufinufft_destroy!(p1.plan)
+        FINUFFT.cufinufft_destroy!(p2.plan)
+        rethrow()
+    end
 end
 
 function _makeplan(type::Int, ms::Vector{Int64}, iflag::Int, spec::FTB.NUFFTSpec{D,R}) where {D,R}

@@ -29,17 +29,19 @@ On an even axis the slot of frequency `n/2` also holds `-n/2`: it is its own ima
 either layout ([`is_nyquist`](@ref)). The grid derivative of `cos(n x / 2)` vanishes at the samples, so
 [`derivative_wavenumber`](@ref) is zero there.
 
-## Nyquist twins
+## Widened axes
 
 The conjugate partner of a stored mode `(k₁, k₂)` is `(-k₁, -k₂)`. Where `k₂` is the Nyquist slot of an
 even axis, `-k₂` is the slot itself. On a grid sampled periodically `e^{i(n/2)y} = e^{-i(n/2)y}` at every
-sample, so the slot holds both. On a grid that is not, `+n₂/2` and `-n₂/2` differ, and the value at
-`+n₂/2` is a coefficient the half does not store. A [`NyquistTwin`](@ref) holds those coefficients, one
-slice per nonempty set of axes `d ≥ 2` at their Nyquist slots, and the halved axis carries it
-([`axis_twin`](@ref)). [`unpacked!`](@ref) reads it where index negation leaves the axis.
+sample, so the slot holds both. On a grid that is not, `+n₂/2` and `-n₂/2` are two modes, and the axis is
+widened ([`box_size`](@ref)) to the `n₂ + 1` modes `-n₂/2 … n₂/2` in FFT order, so that index negation
+reaches every partner and [`unpacked!`](@ref) completes the half exactly. A real field's transform
+computes the packed half of its `n`-mode box, `B`, and conjugate symmetry gives its mirror `-B`; with two
+widened axes `d ≥ 2` the modes of the widened box in neither, `+n₂/2` with `-n₃/2` and `-n₂/2` with
+`+n₃/2`, hold zero ([`outside_modes`](@ref)).
 
-On a grid stretched along `y`, the half and its twin reproduce the full spectrum. Without the twin, the
-row `k₂ = -n₂/2` is wrong for `k₁ < 0`:
+On a grid stretched along `y`, the half over the widened box reproduces the full spectrum. The half over
+the `n`-mode box, unpacked by index negation, is wrong on the row `k₂ = -n₂/2` for `k₁ < 0`:
 
 ```@example layout
 using CairoMakie: CairoMakie as Mke
@@ -54,20 +56,16 @@ Y = [yj for xi in x, yj in y]
 f = randn(n1, n2)
 M = n1 * n2
 C(k1, k2) = sum(f .* cis.(-(k1 .* X .+ k2 .* Y))) / M
-
-# The direct-sum spectrum on the modes a real field's transform requests, and the packed half of it.
-ms = (n1, n2)
-ns = FTB.hermitian_request_size(ms)
 freqs(n) = [FTB.mode_frequency(FTB.FFTAxis(n, 1.0), i) for i in 1:n]
-fk = [C(k1, k2) * M for k1 in freqs(ns[1]), k2 in freqs(ns[2])]
-pms = FTB.packed_size(ms, Val(true))
-packed = FTB.publish_packed!(zeros(ComplexF64, pms...), fk, 1 / M, ns, pms, 1, false)
-ks, gs = FTB.conj_twins(Float64, FTB.wavenumber_axes((2π, 2π), ms, Val(true)), ms, ns, M, ())
-FTB.gather_conj_twins!(gs, fk, prod(ns), 1, false)
 
-full = [C(k1, k2) for k1 in freqs(n1), k2 in freqs(n2)]
-centered(A) = circshift(A, (n1 ÷ 2, n2 ÷ 2))     # FFT order to -n/2 … n/2 - 1
-err(A) = log10.(max.(centered(abs.(A .- full)), 1e-17))
+# The direct-sum half over the n-mode box and over the box with axis 2 widened.
+ms = (n1, n2)
+box = FTB.box_size(ms, (false, true))
+narrow = [C(k1, k2) for k1 in 0:(n1 ÷ 2), k2 in freqs(n2)]
+wide = [C(k1, k2) for k1 in 0:(n1 ÷ 2), k2 in freqs(box[2])]
+
+centered(A, m) = circshift(A, (n1 ÷ 2, m ÷ 2))   # FFT order to increasing frequency
+err(A, m) = log10.(max.(centered(abs.(A .- [C(k1, k2) for k1 in freqs(n1), k2 in freqs(m)]), m), 1e-17))
 
 fig = Mke.Figure()
 h1, h2 = n1 ÷ 2, n2 ÷ 2
@@ -77,14 +75,15 @@ hm1 = Mke.heatmap!(ax1, kc, -h2:h2, [abs(C(k1, k2)) for k1 in kc, k2 in -h2:h2];
 Mke.poly!(ax1, Mke.Rect2f(-h1 - 0.5, -h2 - 0.5, h1, n2 + 1); color = (:gray80, 0.75),
           label = "k₁ < 0: conjugates of the stored half")
 Mke.poly!(ax1, Mke.Rect2f(-0.5, h2 - 0.5, h1 + 1, 1); color = (:orange, 0.0), strokecolor = :orange,
-          strokewidth = 3, label = "twin: k₂ = +n₂/2, k₁ ≥ 0")
+          strokewidth = 3, label = "widened row: k₂ = +n₂/2, k₁ ≥ 0")
 Mke.Colorbar(fig[1, 2], hm1; label = "|C|")
 Mke.Legend(fig[2, 1:5], ax1; orientation = :horizontal, framevisible = false)
-kn = -h1:(h1 - 1)
-for (col, (A, title)) in enumerate(((FTB.unpacked(packed, ms), "unpacked without the twin"),
-                                     (FTB.unpacked(packed, ms, ks), "unpacked with the twin")))
+panels = ((FTB.unpacked(narrow, ms), ms[2], "n-mode box, unpacked"),
+          (FTB.unpacked(wide, box), box[2], "widened box, unpacked"))
+for (col, (A, m, title)) in enumerate(panels)
     ax = Mke.Axis(fig[1, col + 2]; title, xlabel = "k₁", ylabel = "k₂", width = 240, height = 240)
-    hm = Mke.heatmap!(ax, kn, kn, err(A); colormap = :magma, colorrange = (-17, 0))
+    hm = Mke.heatmap!(ax, -h1:(h1 - 1), (-(m ÷ 2)):((m - 1) ÷ 2), err(A, m); colormap = :magma,
+                      colorrange = (-17, 0))
     col == 2 && Mke.Colorbar(fig[1, 5], hm; label = "log₁₀ |error|")
 end
 Mke.resize_to_layout!(fig)
@@ -120,19 +119,10 @@ neg_index
 fold_weight
 mode_fold
 fold_weights
-NyquistTwin
-twin_at
-axis_twin
-with_twin
-nyquist_mask
-in_nyquist_mask
-n_twin_slices
-twin_slice_shape
+box_size
+outside_modes
 ovs_index
-twin_table
-ConjTwinSlice
-conj_twins
-gather_conj_twins!
+even_table_index
 hermitian_request_size
 publish_packed!
 packed_half_view

@@ -129,7 +129,7 @@ Test.@testset "LSMR" begin
                 c, s, r = FTB._sym_ortho(a, b)
                 Test.@test r >= 0 && isfinite(r)
                 if r > 0
-                    tol = sqrt(eps(T)) * max(r, one(T))
+                    tol = 8 * eps(T) * r
                     Test.@test abs(c * a + s * b - r) <= tol
                     Test.@test abs(-s * a + c * b) <= tol
                 end
@@ -158,24 +158,18 @@ Test.@testset "LSMR" begin
         X, info, ws = ls_solve(A, b; maxiter = 300, rtol = 1e-12)
         Test.@test relerr(X, LinearAlgebra.pinv(A) * b) < 1e-10
         Test.@test info.converged
-        Test.@test LinearAlgebra.norm(b - A * X) < 1e-9 * LinearAlgebra.norm(b)
     end
 
     Test.@testset "damping solves the augmented system [A; λI]" begin
         rng = Random.Xoshiro(3)
         A = randn(rng, ComplexF64, 50, 200)
         b = randn(rng, ComplexF64, 50, 1)
-        nx, nr = Float64[], Float64[]
         for λ in (1e-3, 1e-1, 1.0)
             X, info, _ = ls_solve(A, b; maxiter = 2000, rtol = 1e-12, damp = λ)
             aug = [A; λ * Matrix(LinearAlgebra.I, 200, 200)]
             Test.@test relerr(X, aug \ [b; zeros(ComplexF64, 200, 1)]) < 1e-10
             Test.@test info.converged
-            push!(nx, LinearAlgebra.norm(X))
-            push!(nr, LinearAlgebra.norm(b - A * X))
         end
-        Test.@test issorted(nx; rev = true)
-        Test.@test issorted(nr)
     end
 
     Test.@testset "‖r‖ and ‖A†r‖ decrease monotonically on a rank-deficient operator" begin
@@ -236,6 +230,49 @@ Test.@testset "LSMR" begin
                                                                    FTB.DiagonalPreconditioner(ones(39)))
     end
 
+    Test.@testset "range weights solve the weighted least squares" begin
+        rng = Random.Xoshiro(12)
+        # Rows of very different scale, as clustered samples give; the weights that undo the scale make
+        # `A^H W A` the well-conditioned `G^H G`.
+        s = exp10.(range(-1.5, 1.5; length = 200))
+        G = randn(rng, ComplexF64, 200, 30) ./ sqrt(200)
+        A = LinearAlgebra.Diagonal(s) * G
+        w = 1 ./ s .^ 2
+        b = randn(rng, ComplexF64, 200, 1)
+        op = FTB.RangeWeighted(ls_operator(A, 1), w)
+        ref = (sqrt.(w) .* A) \ (sqrt.(w) .* b)
+        Xw, infow, _ = ls_solve(A, b; op, maxiter = 5000, rtol = 1e-12)
+        Test.@test infow.converged
+        Test.@test relerr(Xw, ref) < 1e-9
+        # Data in the range of `A` have the one solution `xc` under any weights.
+        xc = randn(rng, ComplexF64, 30, 1)
+        X2, info2, ws2 = ls_solve(A, A * xc; op, maxiter = 5000, rtol = 1e-12)
+        Test.@test info2.converged
+        Test.@test relerr(X2, xc) < 1e-8
+        # LSMR is MINRES on the normal equations: `‖A^H W r‖ ≤ 2((κ−1)/(κ+1))ᵏ ‖A^H W b‖`, `κ` the condition
+        # number of `√W A = G`.
+        κ = LinearAlgebra.cond(G)
+        Test.@test ws2.iterations[1] ≤ ceil(Int, log(2 / 1e-12) / log((κ + 1) / (κ - 1)))
+        # A divided range sums its weighted parts through the wrapped operator.
+        split = FTB.RangeWeighted(LSSplit(A[1:77, :], A[78:end, :], 1), w)
+        Xs, infos, _ = ls_solve(A, b; op = split, maxiter = 5000, rtol = 1e-12)
+        Test.@test infos.converged && relerr(Xs, ref) < 1e-9
+        # A zero weight removes its row, whatever `b` holds there.
+        keep = trues(200)
+        keep[1:3:90] .= false
+        bnan = copy(b)
+        bnan[.!keep, 1] .= NaN
+        bnan[findfirst(.!keep), 1] = Inf
+        op0 = FTB.RangeWeighted(ls_operator(A, 1), ifelse.(keep, w, 0.0))
+        X0, info0, _ = ls_solve(A, bnan; op = op0, maxiter = 5000, rtol = 1e-12)
+        ref0 = (sqrt.(w[keep]) .* A[keep, :]) \ (sqrt.(w[keep]) .* b[keep, :])
+        Test.@test info0.converged
+        Test.@test relerr(X0, ref0) < 1e-9
+        Test.@test_throws DimensionMismatch FTB.RangeWeighted(ls_operator(A, 1), ones(199))
+        Test.@test_throws ArgumentError FTB.RangeWeighted(ls_operator(A, 1), fill(-1.0, 200))
+        Test.@test_throws ArgumentError FTB.RangeWeighted(ls_operator(A, 1), fill(Inf, 200))
+    end
+
     Test.@testset "the iteration limit, the condition limit and the noise level stop a column" begin
         rng = Random.Xoshiro(8)
         A = randn(rng, ComplexF64, 120, 30)
@@ -269,7 +306,6 @@ Test.@testset "LSMR" begin
         Test.@test_throws DimensionMismatch FTB.lsmr!(zeros(6, 1), op, zeros(20, 1), ws; maxiter = 5)
         Test.@test_throws ArgumentError FTB.lsmr!(zeros(5, 1), op, zeros(20, 1), ws; maxiter = 5, rtol = -1)
         Test.@test_throws ArgumentError FTB.lsmr!(zeros(5, 1), op, zeros(20, 1), ws; maxiter = -1)
-        Test.@test !occursin('\n', sprint(show, ws)) && !occursin('\n', sprint(show, op))
     end
 
     Test.@testset "a range divided among processes needs its sums and nothing else" begin

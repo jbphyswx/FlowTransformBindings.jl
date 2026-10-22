@@ -11,8 +11,9 @@ using FlowTransformBindings: FlowTransformBindings as FTB
   type-1 and type-2 transforms in 1, 2 or 3 dimensions through FINUFFT (cuFINUFFT on CUDA arrays) or
   NonuniformFFTs.jl, one interface for both.
 - [Packed layout](layout.md): the wavenumber axes of a transformed field, the half a real field's
-  transform stores, the weights that sum it as the full spectrum, the Nyquist twins a grid not sampled
-  periodically needs, and the dealiasing cutoffs and exact padding of pseudospectral products.
+  transform stores, the weights that sum it as the full spectrum, the widened axes holding both `±n/2`
+  where the samples tell them apart, and the dealiasing cutoffs and exact padding of pseudospectral
+  products.
 - [Least squares](lsmr.md): [`FTB.lsmr!`](@ref FlowTransformBindings.lsmr!) solves stacks of
   least-squares problems sharing one operator by LSMR, such as a Fourier fit to scattered samples
   through a NUFFT plan.

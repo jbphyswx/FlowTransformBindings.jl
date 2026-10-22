@@ -46,7 +46,7 @@ end
 function FTB._diagscale!(z::GPUArraysCore.AnyGPUArray, d::AbstractArray, v::AbstractArray,
                          ks::UnitRange{Int})
     len = length(d)
-    _cols(z, ks, len) .= vec(d) .* _cols(v, ks, len)
+    _cols(z, ks, len) .= FTB._weighted.(vec(d), _cols(v, ks, len))
     return z
 end
 

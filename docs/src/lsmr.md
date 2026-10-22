@@ -24,7 +24,8 @@ An operator is any value with the methods below; the solver never forms `A`.
 An operator whose range is divided among processes sums the parts in [`lsmr_range_norm2!`](@ref) and
 [`lsmr_adjoint!`](@ref), and the rest of the recurrence is the same on every process.
 [`FunctionOperator`](@ref) builds an operator from two functions, [`NUFFTOperator`](@ref) takes a NUFFT
-plan's type 2 with type 1 its adjoint, and [`RightPreconditioned`](@ref) solves through `x = N y`.
+plan's type 2 with type 1 its adjoint, [`RightPreconditioned`](@ref) solves through `x = N y`, and
+[`RangeWeighted`](@ref) minimizes `Σⱼ wⱼ |bⱼ − (A x)ⱼ|²`.
 
 ```@example lsmr
 using FlowTransformBindings: FlowTransformBindings as FTB
@@ -82,6 +83,7 @@ RightPreconditioned
 lsmr_precondition!
 lsmr_precondition_adjoint!
 DiagonalPreconditioner
+RangeWeighted
 colnorm2!
 colscale!
 colaxpy!
