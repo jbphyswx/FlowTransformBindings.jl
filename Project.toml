@@ -32,7 +32,7 @@ FlowTransformBindingscuFINUFFTExt = ["CUDA", "FINUFFT"]
 [compat]
 CUDA = "5, 6"
 FFTW = "1.5"
-FINUFFT = "3.5.2"
+FINUFFT = "3"
 FastTransforms = "0.17"
 GPUArraysCore = "0.2"
 Libdl = "1"
