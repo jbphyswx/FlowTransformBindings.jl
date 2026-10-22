@@ -17,7 +17,9 @@ qualified names.
 module FlowTransformBindings
 
 using Libdl: Libdl
-using SpectralBackends: SpectralBackends as SB
+using SpectralBackends: SpectralBackends, SpectralBackends as SB
+
+public SpectralBackends, SB
 
 include("Tags.jl")
 include("NUFFT.jl")
