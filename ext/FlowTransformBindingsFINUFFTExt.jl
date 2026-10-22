@@ -84,6 +84,7 @@ function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,Vector{R}}) where {T,D,R}
     ms = collect(Int64, FTB._mode_size(T, spec.nmodes))
     lk = FINUFFT.finufftlock[]
+    work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
     type1 = _makeplan(1, ms, spec.iflag, spec)
     type2 = try
         _makeplan(2, ms, -spec.iflag, spec)
@@ -91,7 +92,6 @@ function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
         FINUFFT.finufft_destroy!(type1)
         rethrow()
     end
-    work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
     p = FINUFFTPlan{T,D,R,typeof(spec),typeof(type1),typeof(work),typeof(lk)}(spec, nodes, type1, type2, work,
                                                                              false, lk)
     finalizer(_finalize, p)

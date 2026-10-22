@@ -651,6 +651,56 @@ function lsmr_write!(X, p::RightPreconditioned, y, k, j)
 end
 
 """
+    RangeWeighted(op, w)
+
+`op` with the range inner product `⟨u, u′⟩ = Σⱼ wⱼ conj(uⱼ) u′ⱼ` on each column, `w` nonnegative and
+shaped like one column of the range: [`lsmr!`](@ref) then minimizes `Σⱼ wⱼ |bⱼ − (A x)ⱼ|²`, the least
+squares of a quadrature with weights `w`, and the adjoint it applies is `A^H W`. A zero weight removes its
+point from the fit, whatever `b` holds there (a masked value, `NaN` or `Inf`). The norm and the adjoint
+go through `op`'s own, on `√w ∘ u` and `w ∘ u`, so a range divided among processes sums its parts as
+before.
+
+Where `w` makes `A^H W A` close to a multiple of the identity — the quadrature weights of the points, or
+their Voronoi areas — the iteration count falls to the handful a well-conditioned system needs.
+"""
+struct RangeWeighted{O, W<:AbstractArray, R<:AbstractArray}
+    op::O
+    sqrtw::W
+    w::W
+    t::R
+end
+
+function RangeWeighted(op, w::AbstractArray)
+    t = lsmr_allocate_range(op)
+    B = lsmr_ncolumns(op)
+    length(w) * B == length(t) || throw(DimensionMismatch(
+        "the weights hold $(length(w)) values; a column of the range holds $(length(t) ÷ B)"))
+    all(x -> x >= 0 && isfinite(x), w) || throw(ArgumentError("range weights must be nonnegative and finite"))
+    s = sqrt.(w)
+    return RangeWeighted(op, s, copyto!(similar(s), w), t)
+end
+
+Base.show(io::IO, p::RangeWeighted) = print(io, "RangeWeighted(", p.op, ")")
+
+lsmr_ncolumns(p::RangeWeighted) = lsmr_ncolumns(p.op)
+lsmr_allocate_domain(p::RangeWeighted) = lsmr_allocate_domain(p.op)
+lsmr_allocate_range(p::RangeWeighted) = lsmr_allocate_range(p.op)
+lsmr_domain_norm2!(out, p::RangeWeighted, v, n) = lsmr_domain_norm2!(out, p.op, v, n)
+lsmr_check_solution(X, p::RangeWeighted, ws) = lsmr_check_solution(X, p.op, ws)
+lsmr_write!(X, p::RangeWeighted, x, k, j) = lsmr_write!(X, p.op, x, k, j)
+lsmr_forward!(u, p::RangeWeighted, v, c, n) = lsmr_forward!(u, p.op, v, c, n)
+
+function lsmr_range_norm2!(out, p::RangeWeighted, u, n)
+    _diagscale!(p.t, p.sqrtw, u, 1:n)
+    return lsmr_range_norm2!(out, p.op, p.t, n)
+end
+
+function lsmr_adjoint!(v, p::RangeWeighted, u, c, n)
+    _diagscale!(p.t, p.w, u, 1:n)
+    return lsmr_adjoint!(v, p.op, p.t, c, n)
+end
+
+"""
     DiagonalPreconditioner(d)
 
 `N = Diagonal(d)` on each column of a domain stack, with `d` shaped like one column.
@@ -670,12 +720,15 @@ end
 lsmr_precondition!(z, N::DiagonalPreconditioner, v, ks::UnitRange{Int}) = _diagscale!(z, N.d, v, ks)
 lsmr_precondition_adjoint!(v, N::DiagonalPreconditioner, z, c, n) = _diagscale_adjoint!(v, N.d, z, c, n)
 
+# `d v`, and zero where `d` is zero whatever `v` holds there, `NaN` and `Inf` included.
+@inline _weighted(d, v) = (p = d * v; ifelse(iszero(d), zero(p), p))
+
 function _diagscale!(z::AbstractArray, d::AbstractArray, v::AbstractArray, ks::UnitRange{Int})
     len = length(d)
     @inbounds for k in ks
         o = (k - 1) * len
         @simd for i in 1:len
-            z[o + i] = d[i] * v[o + i]
+            z[o + i] = _weighted(d[i], v[o + i])
         end
     end
     return z

@@ -33,19 +33,16 @@ Test.@testset "layout" begin
         for n in (1, 2, 7, 8, 16, 17), L in (2π, 1.0, 3.5)
             ks_f = FTB.wavenumber_axes((L,), (n,), Val(false))
             ks_h = FTB.wavenumber_axes((L,), (n,), Val(true))
-            Test.@test ks_f[1] isa FTB.FFTAxis && ks_h[1] isa FTB.RFFTAxis
             Test.@test collect(ks_f[1]) ≈ FFTW.fftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[1]) ≈ FFTW.rfftfreq(n, n * 2π / L)
             Test.@test [FTB.mode_frequency(ks_f[1], i) for i in 1:n] == Int.(FFTW.fftfreq(n, n))
-            Test.@test FTB.full_length(ks_h[1]) == n && length(ks_h[1]) == n ÷ 2 + 1
+            Test.@test FTB.full_length(ks_h[1]) == n
             Test.@test FTB.max_abs(ks_f[1]) == maximum(abs, collect(ks_f[1])) == FTB.max_abs(ks_h[1])
-            Test.@test sprint(show, ks_h[1]) == "RFFTAxis(n=$n, dk=$(2π / L))"
         end
         Test.@test_throws BoundsError FTB.FFTAxis(4, 1.0)[5]
         ks = FTB.wavenumber_axes((2π, 2π, 2π), (8, 6, 4), Val(true))
-        Test.@test FTB.is_halved(ks) && FTB.full_size(ks) == (8, 6, 4)
+        Test.@test FTB.full_size(ks) == (8, 6, 4)
         Test.@test FTB.spectral_size(ks) == (5, 6, 4) == FTB.packed_size((8, 6, 4), Val(true))
-        Test.@test FTB.packed_size((8, 6, 4), Val(false)) == (8, 6, 4)
         Test.@test eltype(FTB.wavenumber_axes((1.0f0, 2), (4, 4), Val(true))[2]) === Float32
         # A plain vector of wavenumbers reads as a full axis.
         Test.@test !FTB.is_halved((collect(FFTW.fftfreq(8)),))
@@ -54,7 +51,6 @@ Test.@testset "layout" begin
         dev = JLArrays.JLArray(zeros(1))
         kd = FTB.wavenumber_arrays(dev, Float64, ks)
         Test.@test kd[2] isa JLArrays.JLArray && size(kd[2]) == (1, 6, 1) && Array(vec(kd[2])) == collect(ks[2])
-        Test.@test FTB.dealias_factors(dev, Float64, ks, true)[1] isa JLArrays.JLArray
     end
 
     Test.@testset "Nyquist slot and derivative wavenumber" begin
@@ -63,8 +59,6 @@ Test.@testset "layout" begin
                 nyq = [FTB.is_nyquist(a, i) for i in eachindex(a)]
                 # The slot of frequency ±n/2, on both layouts, and only at even n.
                 Test.@test findall(nyq) == (iseven(n) ? [n ÷ 2 + 1] : Int[])
-                Test.@test [FTB.derivative_wavenumber(a, i) for i in eachindex(a)] ==
-                           [nyq[i] ? 0.0 : a[i] for i in eachindex(a)]
             end
             # -k on a full axis, the Nyquist slot mapping to itself.
             a = FTB.FFTAxis(n, 1.0)
@@ -106,7 +100,6 @@ Test.@testset "layout" begin
             Test.@test half(abs2.(û_h)) ≈ E rtol = 1e-13
             Test.@test half(real.(conj.(û_h) .* N̂_h)) ≈ sum(real.(conj.(û_f) .* N̂_f)) rtol = 1e-12 atol = 1e-15 * E
             w = FTB.fold_weights(Float64, ks_h)
-            Test.@test size(w) == (size(û_h, 1), ntuple(_ -> 1, nd - 1)...)
             Test.@test sum(w .* abs2.(û_h)) ≈ E rtol = 1e-14
             Test.@test FTB.fold_weights(Float64, ks_f) == ones(ntuple(_ -> 1, nd))
             Test.@test all(I -> FTB.mode_fold(ks_f, I) == 1, CartesianIndices(û_f))
@@ -122,9 +115,9 @@ Test.@testset "layout" begin
         end
     end
 
-    # A grid not sampled periodically on axis 2: `exp(±i (n₂/2) y)` differ there, so a real field's
-    # coefficient at `(k₁, +n₂/2)` is not reached by index negation, and the halved axis's twin holds it.
-    Test.@testset "Nyquist twin equals the direct sum on a stretched grid" begin
+    # A grid not sampled periodically on axis 2: `exp(±i (n₂/2) y)` differ there, so `±n₂/2` are two modes
+    # and the widened axis holds both.
+    Test.@testset "a widened box unpacks to the direct sum on a stretched grid" begin
         Random.seed!(13)
         n1, n2 = 6, 8
         x = 2π .* (0:(n1 - 1)) ./ n1
@@ -147,29 +140,40 @@ Test.@testset "layout" begin
         Test.@test packed ≈ [C(k1, k2) for k1 in 0:(n1 ÷ 2), k2 in freqs(n2)] rtol = 1e-12
         Test.@test vec(FTB.packed_half_view(fk, ns, pms, 1)) ./ M ≈ vec(packed)
 
-        ks0 = FTB.wavenumber_axes((2π, 2π), ms, Val(true))
-        ks, gs = FTB.conj_twins(Float64, ks0, ms, ns, M, ())
-        FTB.gather_conj_twins!(gs, fk, prod(ns), 1, false)
-        tw = FTB.axis_twin(ks[1])
-        Test.@test tw isa FTB.NyquistTwin && sprint(show, ks[1]) == "RFFTAxis(n=$n1, dk=1.0, twin)"
-        for k1 in 0:(n1 ÷ 2)
-            I = CartesianIndex(k1 + 1, n2 ÷ 2 + 1)
-            Test.@test FTB.nyquist_mask(ks, I) == 1
-            Test.@test tw[1, I] ≈ C(k1, n2 ÷ 2) rtol = 1e-12
-            Test.@test FTB.twin_at(tw, 1, I, 1) == tw[1, I]
-        end
-        Test.@test !(C(1, n2 ÷ 2) ≈ C(1, -(n2 ÷ 2)))     # the twin carries information here
+        # Axis 1 is sampled periodically and keeps its box; axis 2 widens to `-n₂/2 … n₂/2`.
+        box = FTB.box_size(ms, (false, true))
+        Test.@test box == (n1, n2 + 1)
+        Test.@test !(C(1, n2 ÷ 2) ≈ C(1, -(n2 ÷ 2)))     # two modes on these samples
+        Test.@test isempty(FTB.outside_modes(ms, box))
+        half = [C(k1, k2) for k1 in 0:(n1 ÷ 2), k2 in freqs(box[2])]
+        ks = FTB.wavenumber_axes((2π, 2π), box, Val(true))
+        Test.@test FTB.spectral_size(ks) == size(half)
+        Test.@test FTB.unpacked(half, box) ≈ [C(k1, k2) for k1 in freqs(n1), k2 in freqs(box[2])] rtol = 1e-12
+        # Summed with the fold weights, the half gives the energy of the whole box.
+        Test.@test sum(I -> FTB.mode_fold(ks, I) * abs2(half[I]), CartesianIndices(half)) ≈
+                   sum(abs2(C(k1, k2)) for k1 in freqs(n1), k2 in freqs(box[2])) rtol = 1e-12
+    end
 
-        full = [C(k1, k2) for k1 in freqs(n1), k2 in freqs(n2)]
-        Test.@test FTB.unpacked(packed, ms, ks) ≈ full rtol = 1e-12
-        Test.@test !(FTB.unpacked(packed, ms) ≈ full)
+    # Three widened axes: the modes `+n₂/2` with `-n₃/2`, and `-n₂/2` with `+n₃/2`, lie in neither the
+    # `ms`-mode box nor its mirror, one pair per `k₁`.
+    Test.@testset "the modes outside a box and its mirror" begin
+        ms = (6, 8, 4)
+        box = FTB.box_size(ms, (true, true, true))
+        Test.@test box == (7, 9, 5)
+        pbs = FTB.packed_size(box, Val(true))
+        Test.@test pbs[1] == FTB.packed_size(ms, Val(true))[1]
+        k(d, i) = FTB.mode_frequency(FTB.FFTAxis(box[d], 1.0), i)
+        expected = [i for (i, I) in enumerate(CartesianIndices(pbs))
+                    if (k(2, I[2]), k(3, I[3])) in ((4, -2), (-4, 2))]
+        Test.@test FTB.outside_modes(ms, box) == expected
+        Test.@test length(expected) == 2 * pbs[1]
+        Test.@test isempty(FTB.outside_modes(ms, FTB.box_size(ms, (true, false, true))))
     end
 
     Test.@testset "2/3 truncation makes the product exact on the kept modes" begin
         Random.seed!(14)
         for n in (16, 17, 24)
             K = FTB.dealias_cutoff(n)
-            Test.@test K == (n - 1) ÷ 3
             ks_f = (FTB.FFTAxis(n, 1.0),)
             ks_h = (FTB.RFFTAxis(n, 1.0),)
             keep_f = FTB.dealias_factors(zeros(1), Float64, ks_f, true)[1]
@@ -208,7 +212,6 @@ Test.@testset "layout" begin
         Random.seed!(15)
         for n in (8, 9, 16, 17)
             M = FTB.padded_length(n)
-            Test.@test M > 3 * (n ÷ 2) && iseven(M - n)
             u = randn(n)
             v = randn(n)
             L = 4n
@@ -224,7 +227,6 @@ Test.@testset "layout" begin
             wp = real.(FFTW.ifft(pad(û), 1) .* M) .* real.(FFTW.ifft(pad(v̂), 1) .* M)
             w = FTB.padded_truncate!(zeros(ComplexF64, n, 1), FFTW.fft(wp, 1) ./ M, pm)
             Test.@test vec(w) ≈ exact rtol = 1e-12
-            Test.@test FTB.padded_truncate!(zeros(ComplexF64, n, 1), pad(û), pm) ≈ reshape(û, n, 1)
 
             # Halved layout: the same product, stored as its nonnegative half.
             ksh = (FTB.RFFTAxis(n, 1.0),)

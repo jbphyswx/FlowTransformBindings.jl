@@ -1,12 +1,13 @@
 # The packed layout of a transformed field. A real `D`-dimensional field's spectrum is conjugate
 # symmetric, so axis 1 stores the frequencies `0 … ⌊n₁/2⌋` and each `k₁ > 0` stands for its conjugate at
 # `-k`; every other axis, and every axis of a complex field, stores its `n` frequencies in FFT order.
-# Only axis 1 is ever halved.
+# Only axis 1 is ever halved. `n` is the mode count of the coefficient box along the axis: the grid's
+# point count for a full FFT, one more than an even transform size on a widened axis ([`box_size`](@ref)).
 
 """
     AbstractWavenumberAxis{T} <: AbstractVector{T}
 
-A wavenumber axis computed from the index: `n`, the grid's point count along the axis, and the spacing
+A wavenumber axis computed from the index: `n`, the box's mode count along the axis, and the spacing
 `dk = 2π/L`. Its type records the layout: [`RFFTAxis`](@ref) or [`FFTAxis`](@ref).
 """
 abstract type AbstractWavenumberAxis{T<:Real} <: AbstractVector{T} end
@@ -14,21 +15,19 @@ abstract type AbstractWavenumberAxis{T<:Real} <: AbstractVector{T} end
 """
     RFFTAxis(n, dk)
 
-The halved axis of an `n`-point grid: `k_i = (i - 1) dk` for `i = 1 … n÷2 + 1`. `n` is kept because the
-length does not determine it. `twin` holds the [`NyquistTwin`](@ref) of a spectrum whose even axes
-`d ≥ 2` sit on a grid not sampled periodically, and is `nothing` otherwise.
+The halved axis of an `n`-mode box: `k_i = (i - 1) dk` for `i = 1 … n÷2 + 1`. `n` is kept because the
+length does not determine it; it is odd on a widened axis ([`box_size`](@ref)).
 """
-struct RFFTAxis{T, TW} <: AbstractWavenumberAxis{T}
+struct RFFTAxis{T} <: AbstractWavenumberAxis{T}
     n::Int
     dk::T
-    twin::TW
 end
-RFFTAxis(n::Integer, dk::T) where {T<:Real} = RFFTAxis{T, Nothing}(Int(n), dk, nothing)
+RFFTAxis(n::Integer, dk::T) where {T<:Real} = RFFTAxis{T}(Int(n), dk)
 
 """
     FFTAxis(n, dk)
 
-The full axis of an `n`-point grid in FFT order: `k_i = m dk`, `m = i - 1` for `i ≤ ⌈n/2⌉`, else
+The full axis of an `n`-mode box in FFT order: `k_i = m dk`, `m = i - 1` for `i ≤ ⌈n/2⌉`, else
 `i - 1 - n`.
 """
 struct FFTAxis{T} <: AbstractWavenumberAxis{T}
@@ -45,15 +44,14 @@ Base.@propagate_inbounds function Base.getindex(a::AbstractWavenumberAxis, i::In
     return mode_frequency(a, i) * a.dk
 end
 
-Base.show(io::IO, a::RFFTAxis) =
-    print(io, "RFFTAxis(n=", a.n, ", dk=", a.dk, a.twin === nothing ? "" : ", twin", ")")
+Base.show(io::IO, a::RFFTAxis) = print(io, "RFFTAxis(n=", a.n, ", dk=", a.dk, ")")
 Base.show(io::IO, a::FFTAxis) = print(io, "FFTAxis(n=", a.n, ", dk=", a.dk, ")")
 Base.show(io::IO, ::MIME"text/plain", a::AbstractWavenumberAxis) = show(io, a)
 
 """
     wavenumber_axes(Ls, ns, ::Val{real}) -> NTuple
 
-The axes of an `ns`-point grid of periods `Ls`, `dk = 2π/L` in the float type the periods promote to:
+The axes of an `ns`-mode box over periods `Ls`, `dk = 2π/L` in the float type the periods promote to:
 axis 1 an [`RFFTAxis`](@ref) for a real field and every other axis an [`FFTAxis`](@ref).
 """
 @inline function wavenumber_axes(Ls::NTuple{D, Real}, ns::NTuple{D, Integer}, ::Val{R}) where {D, R}
@@ -75,7 +73,7 @@ full one. A plain vector is read as a full axis of its length.
 """
     full_length(axis) -> Int
 
-The grid's point count along the axis: `n` for a wavenumber axis, `length` for a plain vector.
+The box's mode count along the axis: `n` for a wavenumber axis, `length` for a plain vector.
 """
 @inline full_length(a::AbstractWavenumberAxis) = a.n
 @inline full_length(a::AbstractVector) = length(a)
@@ -83,7 +81,7 @@ The grid's point count along the axis: `n` for a wavenumber axis, `length` for a
 """
     full_size(ks) -> NTuple
 
-The grid's point counts, whatever the layout.
+The box's mode counts, whatever the layout.
 """
 @inline full_size(ks::Tuple) = map(full_length, ks)
 
@@ -177,95 +175,47 @@ itself.
 """
 @inline neg_index(a::AbstractVector, i::Integer) = i == 1 ? 1 : full_length(a) - Int(i) + 2
 
-# ── Nyquist twins ───────────────────────────────────────────────────────────────────────────────
-# Negating a stored mode sends an even axis `d ≥ 2` at its Nyquist slot to itself, which on a grid not
-# sampled periodically is a different mode (`+n_d/2` and `-n_d/2` differ there). The halved axis carries
-# those values in a `NyquistTwin`, one slice per nonempty subset of the axes `2:D`.
+# ── Widened axes ────────────────────────────────────────────────────────────────────────────────
+# Negating a stored mode sends an even axis at its Nyquist slot to itself. Where the samples tell
+# `+n/2` from `-n/2` apart (a stretched axis, a node set, an axis transformed below its own length), the
+# two are different modes, and a real field's spectrum, conjugate symmetric, is known on the packed half
+# of the `n`-mode box, `B` (`k₁ = 0 … ⌊n₁/2⌋`, every other axis at its `n` modes), and on its mirror `-B`.
+# The coefficient axis is then widened to the `n + 1` modes `-n/2 … n/2`, in FFT order
+# `0 … n/2, -n/2 … -1`, so that index negation reaches every partner. A mode of that box in neither `B`
+# nor `-B` holds zero.
 
 """
-    NyquistTwin(slices)
+    box_size(ms, distinct) -> NTuple
 
-Coefficients at the modes index negation misses. `slices[mask]` covers the modes whose axes at the
-Nyquist slot are exactly `mask` (bit `d - 2` for axis `d ≥ 2`): entry `I` holds the coefficient at `k₁`,
-`+n_d/2` on the masked axes and `-k_e` on the rest, and each masked axis has extent 1. Read it as
-`t[mask, I]` with `mask = nyquist_mask(ks, I)`.
+The extents of the coefficient box of an `ms`-mode transform: `ms[d] + 1` where `ms[d]` is even and
+`distinct[d]` says the axis's samples tell `+ms[d]/2` from `-ms[d]/2` apart, `ms[d]` elsewhere.
 """
-struct NyquistTwin{S <: Tuple}
-    slices::S
-end
-
-Base.@propagate_inbounds function Base.getindex(t::NyquistTwin, mask::Int, I::CartesianIndex{N}) where {N}
-    return t.slices[mask][CartesianIndex(ntuple(i -> in_nyquist_mask(mask, i) ? 1 : I[i], Val(N)))]
-end
-
-Base.show(io::IO, t::NyquistTwin) = print(io, "NyquistTwin(", join(size.(t.slices), ", "), ")")
-Base.show(io::IO, ::MIME"text/plain", t::NyquistTwin) = show(io, t)
+box_size(ms::NTuple{D, Int}, distinct::NTuple{D, Bool}) where {D} =
+    ntuple(d -> (distinct[d] && iseven(ms[d])) ? ms[d] + 1 : ms[d], Val(D))
 
 """
-    twin_at(t, mask, I, b)
+    outside_modes(ms, box) -> Vector{Int}
 
-Entry of the `mask` slice at the spectral index `I` (rank `D`) and batch member `b`.
+The linear indices, in a real field's packed half over the box `box` of an `ms`-mode transform
+([`box_size`](@ref)), of the modes in neither `B`, the packed half of the `ms`-mode box, nor its mirror
+`-B`: `+ms[d]/2` on one widened axis `d ≥ 2` and `-ms[e]/2` on another. Such a mode holds zero. With at
+most one widened axis `d ≥ 2`, as in two dimensions, there is none.
 """
-Base.@propagate_inbounds function twin_at(t::NyquistTwin, mask::Int, I::CartesianIndex{D}, b::Int) where {D}
-    s = t.slices[mask]
-    lin = 1
-    stride = 1
-    for d in 1:D
-        idx = in_nyquist_mask(mask, d) ? 1 : I[d]
-        lin += (idx - 1) * stride
-        stride *= size(s, d)
+function outside_modes(ms::NTuple{D, Int}, box::NTuple{D, Int}) where {D}
+    out = Int[]
+    for (i, I) in enumerate(CartesianIndices(packed_size(box, Val(true))))
+        plus = false
+        minus = false
+        for d in 2:D
+            box[d] > ms[d] || continue
+            k = mode_frequency(FFTModes(), I[d], box[d])
+            plus |= k == ms[d] ÷ 2
+            minus |= k == -(ms[d] ÷ 2)
+        end
+        plus && minus && push!(out, i)
     end
-    return s[lin + (b - 1) * stride]
+    return out
 end
-
-"""
-    axis_twin(axis) -> Union{NyquistTwin, Nothing}
-
-The twin a halved axis carries, `nothing` on any other.
-"""
-@inline axis_twin(a::RFFTAxis) = a.twin
-@inline axis_twin(::AbstractVector) = nothing
-
-"""
-    with_twin(axis, twin) -> RFFTAxis
-
-The halved `axis` carrying `twin`.
-"""
-@inline with_twin(a::RFFTAxis{T}, tw) where {T} = RFFTAxis{T, typeof(tw)}(a.n, a.dk, tw)
-
-"""
-    nyquist_mask(ks, I) -> Int
-
-The axes `d ≥ 2` on which mode `I` sits at the Nyquist slot, as bits `d - 2`; zero when index negation
-reaches every partner of `I`.
-"""
-@inline nyquist_mask(ks::Tuple, I::CartesianIndex) = _nqmask(Base.tail(ks), I, 2, 0)
-@inline _nqmask(ks::Tuple, I::CartesianIndex, d::Int, acc::Int) =
-    _nqmask(Base.tail(ks), I, d + 1, acc | (is_nyquist(first(ks), I[d]) ? (1 << (d - 2)) : 0))
-@inline _nqmask(::Tuple{}, ::CartesianIndex, ::Int, acc::Int) = acc
-
-"""
-    in_nyquist_mask(mask, d) -> Bool
-
-Whether axis `d` is in `mask`; axis 1 never is.
-"""
-@inline in_nyquist_mask(mask::Int, d::Int) = d >= 2 && ((mask >> (d - 2)) & 1) == 1
-
-"""
-    n_twin_slices(::Val{D}) -> Val
-
-`Val` of the slice count of a `D`-axis twin, `2^(D-1) - 1`.
-"""
-@inline n_twin_slices(::Val{D}) where {D} = Val((1 << (D - 1)) - 1)
-
-"""
-    twin_slice_shape(ms, mask) -> NTuple
-
-Shape of the `mask` slice for full sizes `ms`: a masked axis has extent 1, or 0 when it is odd and so has
-no Nyquist slot.
-"""
-@inline twin_slice_shape(ms::NTuple{D, Int}, mask::Int) where {D} =
-    ntuple(e -> in_nyquist_mask(mask, e) ? (iseven(ms[e]) ? 1 : 0) : packed_size(ms, Val(true))[e], Val(D))
 
 """
     ovs_index(kv, Ñ) -> Int
@@ -274,106 +224,17 @@ The index of integer frequency `kv` on an axis of length `Ñ` in FFT order, `kv 
 """
 @inline ovs_index(kv::Int, Ñ::Int) = kv >= 0 ? kv + 1 : Ñ + kv + 1
 
-# Index into a table even in `k`, sampled at the frequencies of an `N`-mode axis: an even full axis
-# carries `|k| = N/2` only at its Nyquist slot.
+"""
+    even_table_index(kv, N, r2c) -> Int
+
+The index of frequency `kv` in a table even in `k` sampled at the frequencies of an `N`-mode axis, such as
+the `phis` of [`oversampled_spectra`](@ref): `kv + 1` on a halved axis (`r2c`), and on a full axis its FFT
+order index, `|kv| = N/2` at the Nyquist slot of an even `N`.
+"""
 @inline function even_table_index(kv::Int, N::Int, r2c::Bool)
     r2c && return kv + 1
     (iseven(N) && abs(kv) == N ÷ 2) && return N ÷ 2 + 1
     return kv >= 0 ? kv + 1 : N + kv + 1
-end
-
-_fft_frequencies(N::Int) = [mode_frequency(FFTModes(), i, N) for i in 1:N]
-
-# The frequencies the `mask` slice holds at slice index `I`: `+N_d/2` on the masked axes, `k₁` on axis 1,
-# `-k_d` elsewhere.
-@inline _twin_freqs(ms::NTuple{D, Int}, mask::Int, kint::Tuple, I::CartesianIndex) where {D} =
-    ntuple(d -> in_nyquist_mask(mask, d) ? ms[d] ÷ 2 : (d == 1 ? kint[1][I[d]] : -kint[d][I[d]]), Val(D))
-
-"""
-    twin_table(Tr, ms, mask, dims, M; phis, normfactor, conjugate) -> (shape, src, fac)
-
-Gather table for the `mask` slice read out of a spectrum `fk` of array size `dims`:
-`twin[i] = S(fk[src[i]]) fac[i]`, `S` being `conj` when `conjugate` and the identity otherwise. `src`
-indexes the slice entry's frequency (a spectrum holding `+N_d/2`, such as an oversampled NUFFT grid) or,
-with `conjugate`, its negative (a Hermitian spectrum of a real field). `fac` is `1/M`, times
-`normfactor / Π_d phis[d]` when `phis` holds per-axis tables even in `k`.
-"""
-function twin_table(::Type{Tr}, ms::NTuple{D, Int}, mask::Int, dims::NTuple{D, Int}, M::Int;
-        phis::Union{Nothing, Tuple} = nothing, normfactor::Real = 1, conjugate::Bool = false) where {Tr, D}
-    shape = twin_slice_shape(ms, mask)
-    S = prod(shape)
-    kint = ntuple(d -> d == 1 ? collect(0:(ms[1] ÷ 2)) : _fft_frequencies(ms[d]), D)
-    src = Vector{Int}(undef, S)
-    fac = Vector{Complex{Tr}}(undef, S)
-    inv_M = one(Tr) / M
-    isign = conjugate ? -1 : 1
-    @inbounds for (si, I) in enumerate(CartesianIndices(shape))
-        kt = _twin_freqs(ms, mask, kint, I)
-        lin = 1
-        stride = 1
-        β = Tr(normfactor) * inv_M
-        for d in 1:D
-            lin += (ovs_index(isign * kt[d], dims[d]) - 1) * stride
-            stride *= dims[d]
-            phis === nothing || (β /= Tr(phis[d][even_table_index(kt[d], ms[d], d == 1)]))
-        end
-        src[si] = lin
-        fac[si] = β
-    end
-    return shape, src, fac
-end
-
-"""
-    ConjTwinSlice(slice, src, fac)
-
-One slice of a [`NyquistTwin`](@ref) with its [`twin_table`](@ref) for conjugate reads.
-"""
-struct ConjTwinSlice{SL, IX, FC}
-    slice::SL
-    src::IX
-    fac::FC
-end
-
-"""
-    conj_twins(Tr, ks, ms, ns, M, batch) -> (ks, slices)
-
-`ks` with a [`NyquistTwin`](@ref) on its halved axis, and the [`ConjTwinSlice`](@ref)s that fill it from
-a Hermitian spectrum of array size `ns` by conjugate reads.
-"""
-function conj_twins(::Type{Tr}, ks::Tuple, ms::NTuple{D, Int}, ns::NTuple{D, Int}, M::Int,
-        batch::Tuple) where {Tr, D}
-    D >= 2 || return ks, ()
-    gs = ntuple(n_twin_slices(Val(D))) do mask
-        shape, src, fac = twin_table(Tr, ms, mask, ns, M; conjugate = true)
-        ConjTwinSlice(zeros(Complex{Tr}, shape..., batch...), src, fac)
-    end
-    return (with_twin(ks[1], NyquistTwin(map(g -> g.slice, gs))), Base.tail(ks)...), gs
-end
-
-"""
-    gather_conj_twins!(slices, fk, Pm, ntrans, neg)
-
-Refill every [`ConjTwinSlice`](@ref) from `fk`, whose transforms are `Pm` entries apart: entry `i` of
-transform `t` is `conj(fk[(t-1)Pm + src[i]]) fac[i]`, conjugated again when `neg`.
-"""
-@inline gather_conj_twins!(::Tuple{}, fk, Pm::Int, ntrans::Int, neg::Bool) = nothing
-@inline function gather_conj_twins!(gs::Tuple, fk, Pm::Int, ntrans::Int, neg::Bool)
-    _gather_one_conj!(first(gs), fk, Pm, ntrans, neg)
-    return gather_conj_twins!(Base.tail(gs), fk, Pm, ntrans, neg)
-end
-
-function _gather_one_conj!(g::ConjTwinSlice, fk, Pm::Int, ntrans::Int, neg::Bool)
-    S = length(g.src)
-    S == 0 && return nothing
-    @inbounds for t in 1:ntrans
-        foff = (t - 1) * Pm
-        soff = (t - 1) * S
-        for s in 1:S
-            v = conj(fk[foff + g.src[s]]) * g.fac[s]
-            g.slice[soff + s] = neg ? conj(v) : v
-        end
-    end
-    return nothing
 end
 
 # ── Packing and unpacking ───────────────────────────────────────────────────────────────────────
@@ -426,45 +287,38 @@ other axes whole, the batch axis last.
     view(reshape(fk, ns..., ntrans), 1:pms[1], ntuple(_ -> Colon(), Val(D - 1))..., Colon())
 
 """
-    unpacked!(full, coeffs, ns, ks = nothing) -> full
+    unpacked!(full, coeffs, ns) -> full
 
-The full FFT-order spectrum `(ns…, batch…)` of the packed half `coeffs`, by `C[k] = conj(C[-k])`. Where an
-even axis `d ≥ 2` sits at its Nyquist slot, the partner is read from the twin on `ks[1]`; with no twin,
-from the negated index, which is exact on a grid sampled periodically.
+The full FFT-order spectrum `(ns…, batch…)` of the packed half `coeffs` over the box `ns`, by
+`C[k] = conj(C[-k])`. On a widened axis ([`box_size`](@ref)) the negated index is a mode of the box; on an
+even axis its Nyquist slot is its own image, the one mode the samples hold at `±n/2`.
 """
 function unpacked!(full::AbstractArray{Complex{T}, NT}, coeffs::AbstractArray{Complex{T}, NT},
-        ns::NTuple{D, Int}, ks = nothing) where {T, D, NT}
+        ns::NTuple{D, Int}) where {T, D, NT}
     # Axis 1 holds `k₁ ≥ 0` up to `(n₁ - 1) ÷ 2`; at even `n₁` the next entry is `-n₁/2`, the conjugate of
     # the stored `+n₁/2`.
     h1 = (ns[1] - 1) ÷ 2 + 1
-    twin = ks === nothing ? nothing : axis_twin(ks[1])
     @inbounds for I in CartesianIndices(full)
         if I[1] <= h1
             full[I] = coeffs[I]
             continue
         end
-        q = twin === nothing ? 0 : nyquist_mask(ks, I)
-        if q != 0
-            src1 = CartesianIndex(ntuple(d -> d == 1 ? (ns[1] - I[1] + 2) : I[d], Val(NT)))
-            full[I] = conj(twin[q, src1])
-        else
-            src = CartesianIndex(ntuple(
-                d -> d == 1 ? (ns[1] - I[1] + 2) : (d <= D ? (I[d] == 1 ? 1 : ns[d] - I[d] + 2) : I[d]),
-                Val(NT)))
-            full[I] = conj(coeffs[src])
-        end
+        src = CartesianIndex(ntuple(
+            d -> d == 1 ? (ns[1] - I[1] + 2) : (d <= D ? (I[d] == 1 ? 1 : ns[d] - I[d] + 2) : I[d]),
+            Val(NT)))
+        full[I] = conj(coeffs[src])
     end
     return full
 end
 
 """
-    unpacked(coeffs, ns, ks = nothing) -> full
+    unpacked(coeffs, ns) -> full
 
 [`unpacked!`](@ref) into a new array.
 """
-function unpacked(coeffs::AbstractArray{Complex{T}, NT}, ns::NTuple{D, Int}, ks = nothing) where {T, D, NT}
+function unpacked(coeffs::AbstractArray{Complex{T}, NT}, ns::NTuple{D, Int}) where {T, D, NT}
     batch = ntuple(i -> size(coeffs, D + i), NT - D)
-    return unpacked!(Array{Complex{T}, NT}(undef, ns..., batch...), coeffs, ns, ks)
+    return unpacked!(Array{Complex{T}, NT}(undef, ns..., batch...), coeffs, ns)
 end
 
 # ── Per-axis arrays ─────────────────────────────────────────────────────────────────────────────

@@ -30,9 +30,9 @@ FTB.close!(p); FTB.close!(q)
 A real field's transform stores axis 1 halved, `k₁ = 0, …, ⌊n₁/2⌋`, and every other axis whole in FFT
 order. `RFFTAxis` and `FFTAxis` are those axes, as vectors of wavenumbers computed from the index; the
 layout supplies the weights that sum the half as the full spectrum (`mode_fold`, `fold_weights`), the
-zero derivative at an even axis's Nyquist slot (`derivative_wavenumber`), the `NyquistTwin` values a grid
-not sampled periodically needs to unpack (`unpacked!`), and the dealiasing cutoffs and exact padding of
-pseudospectral products (`dealias_cutoff`, `padded_length`, `PaddedMaps`).
+zero derivative at an even axis's Nyquist slot (`derivative_wavenumber`), the widened axes holding both
+`±n/2` where the samples tell them apart (`box_size`, `outside_modes`, `unpacked!`), and the dealiasing
+cutoffs and exact padding of pseudospectral products (`dealias_cutoff`, `padded_length`, `PaddedMaps`).
 
 ```julia
 ks = FTB.wavenumber_axes((Lx, Ly), (nx, ny), Val(true))   # (RFFTAxis, FFTAxis)
