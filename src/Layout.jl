@@ -18,7 +18,7 @@ abstract type AbstractWavenumberAxis{T<:Real} <: AbstractVector{T} end
 The halved axis of an `n`-mode box: `k_i = (i - 1) dk` for `i = 1 … n÷2 + 1`. `n` is kept because the
 length does not determine it; it is odd on a widened axis ([`box_size`](@ref)).
 """
-struct RFFTAxis{T} <: AbstractWavenumberAxis{T}
+struct RFFTAxis{T<:Real} <: AbstractWavenumberAxis{T}
     n::Int
     dk::T
 end
