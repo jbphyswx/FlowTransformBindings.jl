@@ -249,7 +249,7 @@ Test.@testset "LSMR" begin
         X2, info2, ws2 = ls_solve(A, A * xc; op, maxiter = 5000, rtol = 1e-12)
         Test.@test info2.converged
         Test.@test relerr(X2, xc) < 1e-8
-        # LSMR is MINRES on the normal equations: `‖A^H W r‖ ≤ 2((κ−1)/(κ+1))ᵏ ‖A^H W b‖`, `κ` the condition
+        # LSMR is the minimal-residual method on the normal equations: `‖A^H W r‖ ≤ 2((κ−1)/(κ+1))ᵏ ‖A^H W b‖`, `κ` the condition
         # number of `√W A = G`.
         κ = LinearAlgebra.cond(G)
         Test.@test ws2.iterations[1] ≤ ceil(Int, log(2 / 1e-12) / log((κ + 1) / (κ - 1)))
@@ -257,6 +257,10 @@ Test.@testset "LSMR" begin
         split = FTB.RangeWeighted(LSSplit(A[1:77, :], A[78:end, :], 1), w)
         Xs, infos, _ = ls_solve(A, b; op = split, maxiter = 5000, rtol = 1e-12)
         Test.@test infos.converged && relerr(Xs, ref) < 1e-9
+        # A built weighted operator's weights on another operator over the same range.
+        Xm, _, _ = ls_solve(A, b; op = FTB.RangeWeighted(LSSplit(A[1:77, :], A[78:end, :], 1), op),
+                            maxiter = 5000, rtol = 1e-12)
+        Test.@test relerr(Xm, ref) < 1e-9
         # A zero weight removes its row, whatever `b` holds there.
         keep = trues(200)
         keep[1:3:90] .= false
@@ -383,9 +387,9 @@ Test.@testset "LSMR" begin
         c = rand(rng, 3)
         d = randn(rng, ComplexF64, 20)
         for n in (0, 2, 3)
-            o_h, o_d = zeros(3), zeros(3)
-            Test.@test FTB.colnorm2!(o_d, JL(A3), n, 3) ≈ FTB.colnorm2!(o_h, A3, n, 3) rtol = 1e-14
-            Test.@test FTB._row1norm2!(o_d, JL(A3), 5, n, 3) ≈ FTB._row1norm2!(o_h, A3, 5, n, 3) rtol = 1e-14
+            o_h, o_d = zeros(3), JL(zeros(3))
+            Test.@test Array(FTB.colnorm2!(o_d, JL(A3), n, 3)) ≈ FTB.colnorm2!(o_h, A3, n, 3) rtol = 1e-14
+            Test.@test Array(FTB._row1norm2!(o_d, JL(A3), 5, n, 3)) ≈ FTB._row1norm2!(o_h, A3, 5, n, 3) rtol = 1e-14
             Test.@test Array(FTB.colscale!(JL(A3), JL(c), n, 3)) ≈ FTB.colscale!(copy(A3), c, n, 3)
             Test.@test Array(FTB.colaxpy!(JL(A3), JL(c), JL(2A3), n, 3)) ≈ FTB.colaxpy!(copy(A3), c, 2A3, n, 3)
             Test.@test Array(FTB.colxpby!(JL(A3), JL(2A3), JL(c), n, 3)) ≈ FTB.colxpby!(copy(A3), 2A3, c, n, 3)

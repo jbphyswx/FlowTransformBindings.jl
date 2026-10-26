@@ -17,6 +17,8 @@ using FlowTransformBindings: FlowTransformBindings as FTB
 - [Least squares](lsmr.md): [`FTB.lsmr!`](@ref FlowTransformBindings.lsmr!) solves stacks of
   least-squares problems sharing one operator by LSMR, such as a Fourier fit to scattered samples
   through a NUFFT plan.
+- [Spherical numerics](spherical.md): Gauss–Legendre and equiangular latitude quadratures, and the
+  Wigner small-d functions by their recurrence in degree.
 - [FastTransforms from tasks](fasttransforms.md):
   [`FTB.with_fasttransforms_threads`](@ref FlowTransformBindings.with_fasttransforms_threads) makes
   FastTransforms calls at a chosen OpenMP thread count, safe from Julia tasks.

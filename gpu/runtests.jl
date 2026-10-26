@@ -55,3 +55,30 @@ Test.@testset "cuFINUFFT plans equal the direct sums" begin
         Test.@test FTB.isclosed(p)
     end
 end
+
+# The LSMR recurrence runs its column states as device broadcasts; the fit equals the host fit.
+Test.@testset "A NUFFTOperator fit on device nodes equals the host fit" begin
+    rng = Random.Xoshiro(2)
+    for T in (ComplexF64, Float64)
+        ys = ntuple(_ -> 2π .* rand(rng, 400), 2)
+        b = randn(rng, T, 400, 2)
+        fits = map((identity, CUDA.CuArray)) do dev
+            p = FTB.plan_nufft(FTB.FINUFFTBackend(), T, map(dev, ys), (8, 7); ntrans = 2, tol = 1e-12)
+            op = FTB.NUFFTOperator(p)
+            ws = FTB.LSMRWorkspace(op)
+            X = FTB.allocate_modes(p)
+            info = FTB.lsmr!(X, op, dev(b), ws; maxiter = 200, rtol = 1e-10)
+            FTB.close!(p)
+            (Array(X), info, ws.iterations)
+        end
+        Test.@test fits[2][2].converged
+        Test.@test fits[2][3] == fits[1][3]
+        Test.@test relerr(vec(fits[2][1]), vec(fits[1][1])) < 1e-9
+    end
+end
+
+Test.@testset "A device plan refuses FFTW planner flags" begin
+    x = CUDA.CuArray(2π .* rand(Random.Xoshiro(3), 40))
+    estimate = UInt32(64)                      # `FFTW.ESTIMATE`
+    Test.@test_throws ArgumentError FTB.plan_nufft(FTB.FINUFFTBackend(; fftw_flags = estimate), ComplexF64, (x,), (8,))
+end

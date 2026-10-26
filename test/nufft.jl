@@ -160,7 +160,7 @@ Test.@testset "Task-local plans run concurrently: $(nameof(typeof(backend)))" fo
     refs = [vec(nu_type2(ys, reshape(F, size(F)..., 1), freqs, false)) for F in Fs]
     plans = [FTB.task_local_plan(p) for _ in Fs]
     tasks = [Threads.@spawn FTB.nufft_type2!(FTB.allocate_values(q), q, F) for (q, F) in zip(plans, Fs)]
-    Test.@test all(relerr(fetch(t), r) < 10 * FTB.tolerance(p) for (t, r) in zip(tasks, refs))
+    Test.@test all(relerr(vec(fetch(t)), r) < 10 * FTB.tolerance(p) for (t, r) in zip(tasks, refs))
     foreach(FTB.close!, plans)
     FTB.close!(p)
 end
@@ -188,6 +188,7 @@ Test.@testset "Plan lifecycle and checks: $(nameof(typeof(backend)))" for backen
     s = sprint(show, p)
     Test.@test !occursin('\n', s) && startswith(s, string(nameof(typeof(p))))
     c, F = FTB.allocate_values(p), FTB.allocate_modes(p)
+    Test.@test size(c) == (30, 1) && size(F) == (12, 1)
     Test.@test_throws DimensionMismatch FTB.nufft_type1!(zeros(ComplexF64, 11), p, c)
     Test.@test_throws DimensionMismatch FTB.nufft_type2!(zeros(ComplexF64, 29), p, F)
     Test.@test_throws ArgumentError FTB.nufft_type2!(zeros(Float64, 30), p, F)
@@ -206,10 +207,10 @@ end
 Test.@testset "FINUFFT plans are freed by collection" begin
     ext = Base.get_extension(FTB, :FlowTransformBindingsFINUFFTExt)
     xs = (rand(Random.Xoshiro(20), 40) .* 2π,)
-    freed(p) = FTB.isclosed(p) && p.type1.plan_ptr == C_NULL && p.type2.plan_ptr == C_NULL
+    destroyed(p) = p.type1.plan_ptr == C_NULL && p.type2.plan_ptr == C_NULL
     p = FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,))
     ext._finalize(p)
-    Test.@test freed(p)
+    Test.@test FTB.isclosed(p) && destroyed(p)
     Test.@test FTB.close!(p) === nothing
 
     q = FTB.plan_nufft(FTB.FINUFFTBackend(), Float64, xs, (8,))
@@ -217,31 +218,40 @@ Test.@testset "FINUFFT plans are freed by collection" begin
     holder = Threads.@spawn (lock(q.lock); put!(locked, nothing); take!(release); unlock(q.lock))
     take!(locked)
     ext._finalize(q)
-    Test.@test !FTB.isclosed(q) && any(r -> r === q, ext._DEFERRED)
+    queued = ext._DEFERRED[1]
+    Test.@test !destroyed(q) && any(r -> r[1] === q.type1, queued) && any(r -> r[1] === q.type2, queued)
     put!(release, nothing)
     wait(holder)
     FTB.close!(FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,)))
-    Test.@test freed(q) && isempty(ext._DEFERRED)
+    Test.@test destroyed(q) && all(isempty, ext._DEFERRED)
 
     for _ in 1:50
         FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,))
     end
     GC.gc()
     FTB.close!(FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,)))
-    Test.@test isempty(ext._DEFERRED)
+    Test.@test all(isempty, ext._DEFERRED)
 end
 
-# Every pair of counts, one of them equal to the dimension, at both thread counts a NonuniformFFTs plan
-# takes.
-Test.@testset "plan_type is the type of the plan at another transform count" begin
-    xs = (rand(Random.Xoshiro(11), 30) .* 2π, rand(Random.Xoshiro(12), 30) .* 2π)
-    for backend in NU_BACKENDS, T in (ComplexF64, Float64), nt in unique((1, Threads.nthreads()))
-        ps = Dict(B => FTB.plan_nufft(backend, T, xs, (9, 8); ntrans = B, nthreads = nt) for B in (1, 2, 3, 5))
-        for a in keys(ps), b in keys(ps)
-            Test.@test FTB.plan_type(typeof(ps[a]), b) === typeof(ps[b])
-        end
-        foreach(FTB.close!, values(ps))
+# Plans under either planner flag transform alike, a task-local plan keeps the flags, and a device plan,
+# whose FFT takes none, refuses them.
+Test.@testset "FFTW planner flags on the backend tag: $Tag" for Tag in (FTB.FINUFFTBackend, FTB.NonuniformFFTsBackend)
+    rng = Random.Xoshiro(11)
+    L, o = nu_box(2)
+    xs, ys = nu_nodes(rng, Float64, 60, L, o)
+    for flags in (FFTW.ESTIMATE, FFTW.MEASURE), T in (ComplexF64, Float64)
+        tag = Tag(; fftw_flags = flags)
+        p = FTB.plan_nufft(tag, T, xs, (9, 8); period = L, origin = o, ntrans = 2)
+        e1, e2 = nu_errors(p, ys, rng)
+        Test.@test e1 < 10 * FTB.tolerance(p)
+        Test.@test e2 < 10 * FTB.tolerance(p)
+        q = FTB.task_local_plan(p)
+        Test.@test FTB._backend(q) === tag
+        FTB.close!(q)
+        FTB.close!(p)
     end
+    Test.@test_throws ArgumentError FTB.plan_nufft(Tag(; fftw_flags = FFTW.ESTIMATE), Float64,
+                                                   (JLArrays.JLArray(2π .* rand(rng, 20)),), (8,))
 end
 
 Test.@testset "Arguments a plan cannot take" begin

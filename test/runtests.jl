@@ -28,7 +28,7 @@ function coefficient_sets(n::Int, seed::Int)
     end
 end
 
-const TOPICS = ["fasttransforms_guard", "nufft", "layout", "lsmr"]
+const TOPICS = ["fasttransforms_guard", "nufft", "layout", "lsmr", "quadrature", "wigner_d", "jet"]
 
 Test.@testset "FlowTransformBindings" begin
     for topic in (isempty(ARGS) ? TOPICS : ARGS)

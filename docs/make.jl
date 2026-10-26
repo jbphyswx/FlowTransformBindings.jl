@@ -16,6 +16,7 @@ Documenter.makedocs(;
         "Nonuniform FFTs" => "nufft.md",
         "Packed layout" => "layout.md",
         "Least squares" => "lsmr.md",
+        "Spherical numerics" => "spherical.md",
         "FastTransforms from tasks" => "fasttransforms.md",
     ],
 )

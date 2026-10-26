@@ -99,7 +99,8 @@ or `D`-tuples), and `k` over the frequencies of `order` on each axis. Type 1 is 
 type 2. For real `T`, axis 1 holds `k₁ = 0, …, ⌊n₁/2⌋` ascending and type 2 evaluates
 `cⱼ = Re Σ_k w(k₁) F_k exp(-iflag · i k⋅yⱼ)`, `w(0) = 1`, `w(k₁ > 0) = 2`, so each row `k₁ > 0`
 also stands for its conjugate at `-k`; type 1 is then the adjoint under the inner product weighted
-by `w`. `tol` is raised to `eps(real(T))`; `nthreads` is the library's own thread count.
+by `w`. `tol` is raised to `eps(real(T))`; `nthreads` is the library's own thread count. Options of
+one library, such as its FFT planner flags, are fields of its `backend`.
 """
 function plan_nufft(backend::SB.AbstractNUFFTSpectralBackend, ::Type{T},
                     nodes::NTuple{D,AbstractVector{<:Real}}, nmodes::NTuple{D,Integer};
@@ -215,10 +216,7 @@ isclosed(p::AbstractNUFFTPlan) = p.closed
 The size of one field's mode array: `nmodes(plan)`, with `n₁ ÷ 2 + 1` rows on axis 1 for real
 values.
 """
-mode_size(p::AbstractNUFFTPlan{T}) where {T} = _mode_size(T, p.spec.nmodes)
-
-_mode_size(::Type{<:Complex}, n::Tuple) = n
-_mode_size(::Type{<:Real}, n::Tuple) = (first(n) ÷ 2 + 1, Base.tail(n)...)
+mode_size(p::AbstractNUFFTPlan{T}) where {T} = packed_size(T, p.spec.nmodes)
 
 """
     mode_frequencies(plan, d) -> Vector{Int}
@@ -235,20 +233,19 @@ end
 """
     allocate_values(plan) -> array
 
-Zeroed values for the plan: length `npoints(plan)`, times `ntrans(plan)` columns when above 1.
+Zeroed values for the plan, of size `(npoints(plan), ntrans(plan))`.
 """
 allocate_values(p::AbstractNUFFTPlan{T}) where {T} = _zeros(first(p.nodes), T, _batched(p, (npoints(p),)))
 
 """
     allocate_modes(plan) -> array
 
-Zeroed modes for the plan: `mode_size(plan)`, times `ntrans(plan)` along a trailing axis when
-above 1.
+Zeroed modes for the plan, of size `(mode_size(plan)..., ntrans(plan))`.
 """
 allocate_modes(p::AbstractNUFFTPlan{T}) where {T} =
     _zeros(first(p.nodes), Complex{real(T)}, _batched(p, mode_size(p)))
 
-_batched(p::AbstractNUFFTPlan, dims::Tuple) = ntrans(p) == 1 ? dims : (dims..., ntrans(p))
+_batched(p::AbstractNUFFTPlan, dims::Tuple) = (dims..., ntrans(p))
 _zeros(like::AbstractArray, ::Type{T}, dims::Tuple) where {T} = fill!(similar(like, T, dims), zero(T))
 
 """
@@ -320,15 +317,6 @@ function task_local_plan(p::AbstractNUFFTPlan{T}) where {T}
 end
 
 """
-    plan_type(P, ntrans) -> Type
-
-The type of the plan `plan_nufft` returns for `ntrans` fields, given the type `P` of one built with its
-other arguments, derived without building a plan: `P` itself where the library holds the transform
-count at runtime.
-"""
-plan_type(::Type{P}, ::Integer) where {P<:AbstractNUFFTPlan} = P
-
-"""
     oversampled_spectra(plan) -> (spectra, normfactor, phis)
 
 The oversampled type-1 spectra the plan's last execution computed, one per transform, in FFT order,
@@ -387,10 +375,11 @@ _unavailable(b) = ArgumentError(
     "FlowTransformBindings.NonuniformFFTsBackend() (`using NonuniformFFTs`); got $b")
 
 # Runs `f()` and restores FFTW's process-wide planner thread count, which FINUFFT sets when it plans
-# its FFT in `finufft_setpts!`. The FFTW extension supplies the method; without FFTW.jl loaded,
-# `FFTW.get_num_threads` has no reader.
-function _fftw_threads_preserved end
-_preserving_fftw_threads(f) = _ext_loaded(:FlowTransformBindingsFFTWExt) ? _fftw_threads_preserved(f) : f()
+# its FFT in `finufft_setpts!`. The FFTW extension adds the method for `_FFTWThreads`; without FFTW.jl
+# loaded there is no count to restore.
+struct _FFTWThreads end
+_preserving(::Any, f) = f()
+_preserving_fftw_threads(f) = _preserving(_FFTWThreads(), f)
 
 # ── Real values on a library that transforms complex values only ────────────────────────────────────
 # The frequencies k₁ = 0 … ⌊n₁/2⌋ are the centered block of n = n₁ ÷ 2 + 1 modes shifted by s = n ÷ 2:
@@ -412,7 +401,7 @@ end
 function _half_work(like::AbstractVector{R}, spec::NUFFTSpec{D,R}) where {D,R}
     C = Complex{R}
     M, B = length(like), spec.ntrans
-    ms = _mode_size(R, spec.nmodes)
+    ms = packed_size(R, spec.nmodes)
     values = similar(like, C, M, B)
     modes = similar(like, C, (ms..., B))
     w = _HalfWork(similar(like, C, M), values, modes, first(ms) ÷ 2, spec.iflag)

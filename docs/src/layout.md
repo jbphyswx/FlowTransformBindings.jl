@@ -12,7 +12,7 @@ computed from the index, with `dk = 2π/L`. A complex field's transform is full 
 ```@example layout
 using FlowTransformBindings: FlowTransformBindings as FTB
 
-ks = FTB.wavenumber_axes((2π, 4π), (8, 6), Val(true))
+ks = FTB.wavenumber_axes(Float64, (2π, 4π), (8, 6))
 ks, FTB.spectral_size(ks), collect(ks[2])
 ```
 
