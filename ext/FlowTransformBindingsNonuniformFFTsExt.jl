@@ -3,15 +3,19 @@ module FlowTransformBindingsNonuniformFFTsExt
 using FlowTransformBindings: FlowTransformBindings as FTB
 using NonuniformFFTs: NonuniformFFTs
 
+FTB.is_available(::FTB.NonuniformFFTsBackend) = true
+
 """
     NonuniformFFTsPlan{T,D,R,B}
 
 One `PlanNUFFT` over nodes the handle owns, serving both directions. NonuniformFFTs takes a tuple of
-one array per transform, so the transform count `B` is a type parameter.
+one array per transform, so the transform count `B` is a type parameter. `fftw_flags` are the
+backend's.
 """
-mutable struct NonuniformFFTsPlan{T, D, R, B, S<:FTB.NUFFTSpec{D,R}, V<:AbstractVector{R}, P} <:
-               FTB.AbstractNUFFTPlan{T,D}
+mutable struct NonuniformFFTsPlan{T, D, R, B, S<:FTB.NUFFTSpec{D,R}, F<:Union{Nothing,UInt32},
+                                  V<:AbstractVector{R}, P} <: FTB.AbstractNUFFTPlan{T,D}
     const spec::S
+    const fftw_flags::F
     nodes::NTuple{D,V}
     const plan::P
     closed::Bool
@@ -45,25 +49,38 @@ function _blocked(backend::NonuniformFFTs.KA.Backend, nthreads::Int)
                         "$(Threads.nthreads()) threads; got nthreads = $nthreads"))
 end
 
-function FTB._build(::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
+function FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}}
     backend = _ka_backend(first(nodes))
+    backend isa NonuniformFFTs.KA.GPU && FTB._check_device_flags(tag)
     σ = spec.upsampfac === nothing ? _default_upsampfac(spec.tol, spec.nmodes) : spec.upsampfac
     kw = (; ntransforms = Val(spec.ntrans), m = _halfsupport(spec.tol, σ), σ,
-            fftshift = spec.order isa FTB.CenteredModes, sort_points = NonuniformFFTs.True(), backend)
+            fftshift = spec.order isa FTB.CenteredModes, sort_points = NonuniformFFTs.True(), backend,
+            _fftw(tag.fftw_flags)...)
     blocked = _blocked(backend, spec.nthreads)
     # `PlanNUFFT` sets FFTW's process-wide planner thread count; this restores it, holding FFTW's lock.
     plan = NonuniformFFTs.FFTW.set_num_threads(NonuniformFFTs.FFTW.get_num_threads()) do
         blocked ? NonuniformFFTs.PlanNUFFT(T, spec.nmodes; kw...) :
                   NonuniformFFTs.PlanNUFFT(T, spec.nmodes; kw..., block_size = nothing)
     end
-    NonuniformFFTs.set_points!(plan, nodes)
-    return NonuniformFFTsPlan{T,D,R,spec.ntrans,typeof(spec),V,typeof(plan)}(spec, nodes, plan, false)
+    return _wrap(T, spec, tag.fftw_flags, nodes, plan)
 end
+
+_fftw(::Nothing) = (;)
+_fftw(flags::UInt32) = (; fftw_flags = flags)
+
+# `PlanNUFFT`'s type carries the kernel half-width `tol` sets, the transform count and the block layout;
+# the handle is typed by it.
+function _wrap(::Type{T}, spec::FTB.NUFFTSpec{D,R}, flags::F, nodes::NTuple{D,V}, plan::P) where {T,D,R,F,V,P}
+    NonuniformFFTs.set_points!(plan, nodes)
+    return NonuniformFFTsPlan{T,D,R,_ntransforms(plan),typeof(spec),F,V,P}(spec, flags, nodes, plan, false)
+end
+
+_ntransforms(::NonuniformFFTs.PlanNUFFT{Z,N,Nc}) where {Z,N,Nc} = Nc
 
 FTB._set_nodes!(p::NonuniformFFTsPlan) = (NonuniformFFTs.set_points!(p.plan, p.nodes); p)
 
-FTB._backend(::NonuniformFFTsPlan) = FTB.NonuniformFFTsBackend()
+FTB._backend(p::NonuniformFFTsPlan) = FTB.NonuniformFFTsBackend(p.fftw_flags)
 
 # One array per transform: the slices along the trailing batch axis, or the array itself.
 @inline _fields(u::AbstractArray, ::Val{N}, ::Val{B}) where {N,B} =
@@ -85,37 +102,5 @@ function FTB.oversampled_spectra(p::NonuniformFFTsPlan{<:Real})
     normfactor = prod(Ñ -> 2π / Ñ, size(first(data.us)))
     return data.ûs, normfactor, map(NonuniformFFTs.fourier_coefficients, p.plan.kernels)
 end
-
-# `PlanNUFFT` carries the transform count as its type parameter 3, and again inside its data and block
-# types (its parameters 10 and 11): each holds the count as its own parameter 3, and per-transform
-# `NTuple` members from parameter 5 on. Parameter 4 of `RealNUFFTData` is a `D`-tuple of frequencies, an
-# `NTuple` whose length is the dimension, so the rewrite starts at 5.
-_retype_count(@nospecialize(x), old::Int, k::Int) = x
-_retype_count(::Type{NTuple{N,X}}, old::Int, k::Int) where {N,X} = N == old ? NTuple{k,X} : NTuple{N,X}
-_retype_count(::Type{Vector{NTuple{N,X}}}, old::Int, k::Int) where {N,X} =
-    N == old ? Vector{NTuple{k,X}} : Vector{NTuple{N,X}}
-
-function _inner_at_width(@nospecialize(Q::Type), old::Int, k::Int)
-    q = collect(Q.parameters)
-    length(q) >= 3 || return Q          # `NullBlockData`, the unblocked layout, carries no count
-    q[3] = k
-    for i in 5:length(q)
-        q[i] = _retype_count(q[i], old, k)
-    end
-    return Base.typename(Q).wrapper{q...}
-end
-
-function _plan_at_width(@nospecialize(P::Type), k::Int)
-    p = collect(P.parameters)
-    old = p[3]::Int
-    old == k && return P
-    p[3] = k
-    p[10] = _inner_at_width(p[10], old, k)
-    p[11] = _inner_at_width(p[11], old, k)
-    return Base.typename(P).wrapper{p...}
-end
-
-FTB.plan_type(::Type{NonuniformFFTsPlan{T,D,R,B,S,V,P}}, k::Integer) where {T,D,R,B,S,V,P} =
-    NonuniformFFTsPlan{T,D,R,Int(k),S,V,_plan_at_width(P, Int(k))}
 
 end # module FlowTransformBindingsNonuniformFFTsExt

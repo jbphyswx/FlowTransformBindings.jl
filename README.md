@@ -23,7 +23,10 @@ q = FTB.task_local_plan(p)                              # for another task
 FTB.close!(p); FTB.close!(q)
 ```
 
-`benchmark/nufft_libraries.jl` times both libraries over a range of point counts.
+A tag carries the options of its library: `FINUFFTBackend(; fftw_flags)` and
+`NonuniformFFTsBackend(; fftw_flags)` take FFTW's planner flags for a host plan's FFT, `FFTW.ESTIMATE` for
+a plan executed a few times. `benchmark/nufft_libraries.jl` times both libraries over a range of point
+counts under either flag.
 
 ## Packed layout
 
@@ -35,7 +38,7 @@ zero derivative at an even axis's Nyquist slot (`derivative_wavenumber`), the wi
 cutoffs and exact padding of pseudospectral products (`dealias_cutoff`, `padded_length`, `PaddedMaps`).
 
 ```julia
-ks = FTB.wavenumber_axes((Lx, Ly), (nx, ny), Val(true))   # (RFFTAxis, FFTAxis)
+ks = FTB.wavenumber_axes(Float64, (Lx, Ly), (nx, ny))     # a real field: (RFFTAxis, FFTAxis)
 E = sum(I -> FTB.mode_fold(ks, I) * abs2(û[I]), CartesianIndices(û))   # Σ |û|² over the full spectrum
 ```
 
@@ -52,6 +55,14 @@ op = FTB.NUFFTOperator(p)                      # fit Fourier modes to scattered 
 F = FTB.allocate_modes(p)
 FTB.lsmr!(F, op, c, FTB.LSMRWorkspace(op); maxiter = 100, rtol = 1e-10)
 ```
+
+## Spherical numerics
+
+`gauss_legendre!(T, μ, w, lat, n)` gives the Gauss–Legendre nodes, weights and latitudes;
+`equiangular_weights!(w, OpenNodes() | ClosedNodes())` the weights of Fejér's first rule and of
+Driscoll–Healy; `wigner_d!(d, θ, m, n)` the Wigner small-d functions `d^ℓ_{mn}(θ)` by their recurrence in
+`ℓ`, whose primitives (`wigner_d_start`, `wigner_d_coeffs`, `wigner_d_step`, `wigner_d_rescale`) serve
+transforms that run it over many angles.
 
 ## FastTransforms from Julia tasks
 

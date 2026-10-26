@@ -49,16 +49,20 @@ Base.show(io::IO, a::FFTAxis) = print(io, "FFTAxis(n=", a.n, ", dk=", a.dk, ")")
 Base.show(io::IO, ::MIME"text/plain", a::AbstractWavenumberAxis) = show(io, a)
 
 """
-    wavenumber_axes(Ls, ns, ::Val{real}) -> NTuple
+    wavenumber_axes(T, Ls, ns) -> NTuple
 
-The axes of an `ns`-mode box over periods `Ls`, `dk = 2π/L` in the float type the periods promote to:
-axis 1 an [`RFFTAxis`](@ref) for a real field and every other axis an [`FFTAxis`](@ref).
+The axes of an `ns`-mode box over periods `Ls` for a field of element type `T`, `dk = 2π/L` in the float
+type the periods promote to: axis 1 an [`RFFTAxis`](@ref) for real `T` and every other axis an
+[`FFTAxis`](@ref).
 """
-@inline function wavenumber_axes(Ls::NTuple{D, Real}, ns::NTuple{D, Integer}, ::Val{R}) where {D, R}
-    T = float(promote_type(map(typeof, Ls)...))
-    return ntuple(d -> (R && d == 1) ? RFFTAxis(ns[d], T(2π) / T(Ls[d])) : FFTAxis(Int(ns[d]), T(2π) / T(Ls[d])),
-                  Val(D))
+@inline function wavenumber_axes(::Type{T}, Ls::NTuple{D, Real}, ns::NTuple{D, Integer}) where {T<:Number, D}
+    R = float(promote_type(map(typeof, Ls)...))
+    dks = map(L -> R(2π) / R(L), Ls)
+    return (_first_axis(T, ns[1], dks[1]), map((n, dk) -> FFTAxis(Int(n), dk), Base.tail(ns), Base.tail(dks))...)
 end
+
+_first_axis(::Type{<:Real}, n::Integer, dk) = RFFTAxis(n, dk)
+_first_axis(::Type{<:Complex}, n::Integer, dk) = FFTAxis(Int(n), dk)
 
 """
     mode_frequency(axis, i) -> Int
@@ -93,13 +97,13 @@ The shape of one field's coefficients: `full_size(ks)` with axis 1 at `n₁ ÷ 2
 @inline spectral_size(ks::Tuple) = map(length, ks)
 
 """
-    packed_size(ns, ::Val{real}) -> NTuple
+    packed_size(T, ns) -> NTuple
 
-The coefficient shape of a transform of full sizes `ns`, axis 1 halved for a real field.
+The coefficient shape of a transform of full sizes `ns` for a field of element type `T`: axis 1 at
+`n₁ ÷ 2 + 1` for real `T`, `ns` for complex `T`.
 """
-@inline packed_size(ns::NTuple{D, Int}, ::Val{true}) where {D} =
-    ntuple(d -> d == 1 ? ns[d] ÷ 2 + 1 : ns[d], Val(D))
-@inline packed_size(ns::NTuple{D, Int}, ::Val{false}) where {D} = ns
+@inline packed_size(::Type{<:Real}, ns::NTuple{D, Int}) where {D} = (first(ns) ÷ 2 + 1, Base.tail(ns)...)
+@inline packed_size(::Type{<:Complex}, ns::NTuple{D, Int}) where {D} = ns
 
 """
     is_halved(axis) -> Bool
@@ -161,10 +165,10 @@ function even under `k ↦ -k` equals the sum over the stored modes weighted by 
 [`mode_fold`](@ref) along axis 1, shaped to broadcast against one field's coefficients:
 `(length(ks[1]), 1, …)` on a halved layout, a single one `(1, 1, …)` on a full layout.
 """
-function fold_weights(::Type{FT}, ks::Tuple) where {FT}
+function fold_weights(::Type{FT}, ks::NTuple{N,Any}) where {FT,N}
     a = first(ks)
     w = is_halved(a) ? FT[fold_weight(a, i) for i in 1:length(a)] : FT[1]
-    return reshape(w, ntuple(d -> d == 1 ? length(w) : 1, length(ks)))
+    return reshape(w, ntuple(d -> d == 1 ? length(w) : 1, Val(N)))
 end
 
 """
@@ -203,7 +207,7 @@ most one widened axis `d ≥ 2`, as in two dimensions, there is none.
 """
 function outside_modes(ms::NTuple{D, Int}, box::NTuple{D, Int}) where {D}
     out = Int[]
-    for (i, I) in enumerate(CartesianIndices(packed_size(box, Val(true))))
+    for (i, I) in enumerate(CartesianIndices(packed_size(Real, box)))
         plus = false
         minus = false
         for d in 2:D
@@ -255,8 +259,12 @@ The packed half, `scale` times the leading `pms[1]` entries of each axis-1 run o
 size `ns` (see [`hermitian_request_size`](@ref)), conjugated when `neg`. A host loop;
 [`packed_half_view`](@ref) is the form a device broadcast reads.
 """
-function publish_packed!(coeffs, fk, scale::Real, ns::NTuple{D, Int}, pms::NTuple{D, Int}, ntrans::Int,
-        neg::Bool) where {D}
+publish_packed!(coeffs, fk, scale::Real, ns::NTuple{D, Int}, pms::NTuple{D, Int}, ntrans::Int,
+               neg::Bool) where {D} =
+    _publish_packed!(coeffs, fk, scale, ns, pms, ntrans, neg ? conj : identity)
+
+function _publish_packed!(coeffs, fk, scale::Real, ns::NTuple{D, Int}, pms::NTuple{D, Int}, ntrans::Int,
+                          op::F) where {D, F}
     n1s = ns[1]
     n1p = pms[1]
     Ph = prod(pms)
@@ -269,8 +277,7 @@ function publish_packed!(coeffs, fk, scale::Real, ns::NTuple{D, Int}, pms::NTupl
             soff = foff + j * n1s
             poff = j * n1p
             for i in 1:n1p
-                v = fk[soff + i] * scale
-                coeffs[coff + poff + i] = neg ? conj(v) : v
+                coeffs[coff + poff + i] = op(fk[soff + i] * scale)
             end
         end
     end
@@ -291,52 +298,57 @@ other axes whole, the batch axis last.
 
 The full FFT-order spectrum `(ns…, batch…)` of the packed half `coeffs` over the box `ns`, by
 `C[k] = conj(C[-k])`. On a widened axis ([`box_size`](@ref)) the negated index is a mode of the box; on an
-even axis its Nyquist slot is its own image, the one mode the samples hold at `±n/2`.
+even axis its Nyquist slot is its own image, the one mode the samples hold at `±n/2`. Broadcasts over
+strided views, so device arrays run it as kernels.
 """
 function unpacked!(full::AbstractArray{Complex{T}, NT}, coeffs::AbstractArray{Complex{T}, NT},
         ns::NTuple{D, Int}) where {T, D, NT}
     # Axis 1 holds `k₁ ≥ 0` up to `(n₁ - 1) ÷ 2`; at even `n₁` the next entry is `-n₁/2`, the conjugate of
     # the stored `+n₁/2`.
     h1 = (ns[1] - 1) ÷ 2 + 1
-    @inbounds for I in CartesianIndices(full)
-        if I[1] <= h1
-            full[I] = coeffs[I]
-            continue
-        end
-        src = CartesianIndex(ntuple(
-            d -> d == 1 ? (ns[1] - I[1] + 2) : (d <= D ? (I[d] == 1 ? 1 : ns[d] - I[d] + 2) : I[d]),
-            Val(NT)))
-        full[I] = conj(coeffs[src])
+    rest = ntuple(_ -> Colon(), Val(D - 1))
+    batch = ntuple(_ -> Colon(), Val(NT - D))
+    view(full, 1:h1, rest..., batch...) .= view(coeffs, 1:h1, rest..., batch...)
+    dst1 = (h1 + 1):1:ns[1]
+    src1 = (ns[1] - h1 + 1):-1:2
+    for parts in Iterators.product(map(_mirror_parts, Base.tail(ns))...)
+        view(full, dst1, map(first, parts)..., batch...) .= conj.(view(coeffs, src1, map(last, parts)..., batch...))
     end
     return full
 end
 
+# The mirror `j ↦ n - j + 2`, `1 ↦ 1`, of an `n`-mode axis as (destination, source) range pairs.
+_mirror_parts(n::Int) = ((1:1:1, 1:1:1), (2:1:n, n:-1:2))
+
 """
     unpacked(coeffs, ns) -> full
 
-[`unpacked!`](@ref) into a new array.
+[`unpacked!`](@ref) into a new array like `coeffs`.
 """
 function unpacked(coeffs::AbstractArray{Complex{T}, NT}, ns::NTuple{D, Int}) where {T, D, NT}
-    batch = ntuple(i -> size(coeffs, D + i), NT - D)
-    return unpacked!(Array{Complex{T}, NT}(undef, ns..., batch...), coeffs, ns)
+    batch = ntuple(i -> size(coeffs, D + i), Val(NT - D))
+    return unpacked!(similar(coeffs, Complex{T}, (ns..., batch...)), coeffs, ns)
 end
 
 # ── Per-axis arrays ─────────────────────────────────────────────────────────────────────────────
 
 """
-    wavenumber_arrays(proto, FT, ks; derivative = false) -> Vector
+    wavenumber_arrays(proto, FT, ks; derivative = false) -> NTuple
 
 One array per axis of `ks`, holding `k_d` (or [`derivative_wavenumber`](@ref)) along axis `d` and length 1
 along the others, in `proto`'s array type.
 """
-function wavenumber_arrays(proto::AbstractArray, ::Type{FT}, ks::Tuple; derivative::Bool = false) where {FT}
-    nd = length(ks)
-    return [begin
-        m = length(ks[d])
-        h = derivative ? FT[derivative_wavenumber(ks[d], i) for i in 1:m] : collect(FT, ks[d])
-        reshape(copyto!(similar(proto, FT, m), h), ntuple(i -> i == d ? m : 1, nd))
-    end for d in 1:nd]
+function wavenumber_arrays(proto::AbstractArray, ::Type{FT}, ks::NTuple{N,Any};
+                           derivative::Bool = false) where {FT,N}
+    return map(ks, ntuple(identity, Val(N))) do a, d
+        h = derivative ? FT[derivative_wavenumber(a, i) for i in 1:length(a)] : collect(FT, a)
+        _along_axis(proto, h, d, Val(N))
+    end
 end
+
+# The values `h` in `proto`'s array type, laid along axis `d` of `N`.
+_along_axis(proto::AbstractArray, h::AbstractVector{FT}, d::Int, ::Val{N}) where {FT,N} =
+    reshape(copyto!(similar(proto, FT, length(h)), h), ntuple(i -> i == d ? length(h) : 1, Val(N)))
 
 # ── Dealiasing ──────────────────────────────────────────────────────────────────────────────────
 
@@ -365,21 +377,18 @@ Whether mode `I` lies beyond [`dealias_cutoff`](@ref) on any axis.
 end
 
 """
-    dealias_factors(proto, FT, ks, truncate; order = 2) -> Vector
+    dealias_factors(proto, FT, ks, truncate; order = 2) -> NTuple
 
 One array per axis, 1 on the modes [`dealias_cutoff`](@ref) keeps and 0 beyond, shaped to broadcast along
 its axis; their product is the keep mask. All ones when `truncate` is false.
 """
-function dealias_factors(proto::AbstractArray, ::Type{FT}, ks::Tuple, truncate::Bool;
-                         order::Integer = 2) where {FT}
-    nd = length(ks)
-    return [begin
-        a = ks[d]
-        m = length(a)
+function dealias_factors(proto::AbstractArray, ::Type{FT}, ks::NTuple{N,Any}, truncate::Bool;
+                         order::Integer = 2) where {FT,N}
+    return map(ks, ntuple(identity, Val(N))) do a, d
         cut = dealias_cutoff(a, order)
-        h = FT[(!truncate || abs(mode_frequency(a, i)) <= cut) ? one(FT) : zero(FT) for i in 1:m]
-        reshape(copyto!(similar(proto, FT, m), h), ntuple(i -> i == d ? m : 1, nd))
-    end for d in 1:nd]
+        h = FT[(!truncate || abs(mode_frequency(a, i)) <= cut) ? one(FT) : zero(FT) for i in 1:length(a)]
+        _along_axis(proto, h, d, Val(N))
+    end
 end
 
 # ── Exact padding ───────────────────────────────────────────────────────────────────────────────
@@ -437,25 +446,23 @@ _axis_dk(a::AbstractVector) = a[2] - a[1]
 
 The axes of the padded grid `Ms`, with the spacing of `ks` and its layout.
 """
-padded_axes(ks::Tuple, Ms::Tuple) =
-    ntuple(d -> (d == 1 && is_halved(ks)) ? RFFTAxis(Ms[1], _axis_dk(ks[1])) : FFTAxis(Ms[d], _axis_dk(ks[d])),
-           length(ks))
+padded_axes(ks::NTuple{N,Any}, Ms::NTuple{N,Integer}) where {N} = map(_padded_axis, ks, Ms)
+
+_padded_axis(a::RFFTAxis, M::Integer) = RFFTAxis(M, a.dk)
+_padded_axis(a::AbstractVector, M::Integer) = FFTAxis(Int(M), _axis_dk(a))
 
 """
-    padded_derivative_wavenumbers(proto, FT, ks, Ms) -> Vector
+    padded_derivative_wavenumbers(proto, FT, ks, Ms) -> NTuple
 
 [`wavenumber_arrays`](@ref) with `derivative = true` on the padded grid `Ms`, zero on the images of an
 even coarse axis's Nyquist slot, the derivative the coarse grid gives it.
 """
-function padded_derivative_wavenumbers(proto::AbstractArray, ::Type{FT}, ks::Tuple, Ms::Tuple) where {FT}
-    nd = length(ks)
-    kp = padded_axes(ks, Ms)
-    function axis_values(d)
-        m = length(kp[d])
-        h = FT[_padded_derivative(ks[d], kp[d], p, Ms[d], FT) for p in 1:m]
-        return reshape(copyto!(similar(proto, FT, m), h), ntuple(i -> i == d ? m : 1, nd))
+function padded_derivative_wavenumbers(proto::AbstractArray, ::Type{FT}, ks::NTuple{N,Any},
+                                       Ms::NTuple{N,Integer}) where {FT,N}
+    return map(ks, padded_axes(ks, Ms), Ms, ntuple(identity, Val(N))) do a, ap, M, d
+        h = FT[_padded_derivative(a, ap, p, M, FT) for p in 1:length(ap)]
+        _along_axis(proto, h, d, Val(N))
     end
-    return [axis_values(d) for d in 1:nd]
 end
 
 @inline function _padded_derivative(a, ap, p::Integer, M::Integer, ::Type{FT}) where {FT}
@@ -481,34 +488,31 @@ struct PaddedMaps{VI, VF, VVI <: AbstractVector{VI}, VVF <: AbstractVector{VF}}
     c_w::VVF
 end
 
-function PaddedMaps(proto::AbstractArray, ::Type{FT}, ks::Tuple, Ms::Tuple) where {FT}
-    nd = length(ks)
+function PaddedMaps(proto::AbstractArray, ::Type{FT}, ks::NTuple{N,Any}, Ms::NTuple{N,Integer}) where {FT,N}
     ms = spectral_size(ks)
-    kp = padded_axes(ks, Ms)
-    Msp = spectral_size(kp)
+    Msp = spectral_size(padded_axes(ks, Ms))
     linC = LinearIndices(ms)
     linP = LinearIndices(Msp)
-    nyqaxes(C) = count(d -> is_nyquist(ks[d], C[d]), 1:nd)
-    images(C) = vec(collect(Iterators.product(ntuple(d -> padded_images(ks[d], C[d], Ms[d]), nd)...)))
+    nyqaxes(C) = count(map(is_nyquist, ks, C))
     e_src = ones(Int, prod(Msp))
     e_w = zeros(FT, prod(Msp))
     for P in CartesianIndices(Msp)
-        C = ntuple(d -> padded_preimage(ks[d], P[d], Ms[d]), nd)
+        C = map(padded_preimage, ks, Tuple(P), Ms)
         any(iszero, C) && continue
         e_src[linP[P]] = linC[C...]
         e_w[linP[P]] = FT(1) / FT(2)^nyqaxes(C)
     end
     nyq_row = (is_halved(ks) && iseven(full_length(ks[1]))) ? ms[1] : 0
-    mirror(C) = (C[1], ntuple(d -> C[d + 1] == 1 ? 1 : ms[d + 1] - C[d + 1] + 2, nd - 1)...)
+    mirror(C) = (C[1], map((c, m) -> c == 1 ? 1 : m - c + 2, Base.tail(C), Base.tail(ms))...)
     plain = [Tuple{Int, FT}[] for _ in 1:prod(ms)]
     conj_ = [Tuple{Int, FT}[] for _ in 1:prod(ms)]
     for I in CartesianIndices(ms)
         C = Tuple(I)
-        imgs = images(C)
+        imgs = _padded_image_set(ks, C, Ms)
         wt = FT(2)^nyqaxes(C) / FT(length(imgs))
         if C[1] == nyq_row
             append!(plain[linC[I]], (linP[P...], wt / 2) for P in imgs)
-            append!(conj_[linC[I]], (linP[P...], wt / 2) for P in images(mirror(C)))
+            append!(conj_[linC[I]], (linP[P...], wt / 2) for P in _padded_image_set(ks, mirror(C), Ms))
         else
             append!(plain[linC[I]], (linP[P...], wt) for P in imgs)
         end
@@ -527,6 +531,13 @@ function PaddedMaps(proto::AbstractArray, ::Type{FT}, ks::Tuple, Ms::Tuple) wher
 end
 
 Base.show(io::IO, pm::PaddedMaps) = print(io, "PaddedMaps(", length(pm.e_src), " padded coefficients)")
+
+# The padded index tuples coefficient `C` embeds into, the product of its per-axis
+# [`padded_images`](@ref), axis 1 varying fastest.
+function _padded_image_set(ks::NTuple{N,Any}, C::NTuple{N,Int}, Ms::NTuple{N,Integer}) where {N}
+    imgs = map(padded_images, ks, C, Ms)
+    return [map(getindex, imgs, Tuple(J)) for J in CartesianIndices(map(length, imgs))]
+end
 
 """
     padded_embed!(dst, src, maps::PaddedMaps) -> dst

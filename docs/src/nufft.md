@@ -55,6 +55,22 @@ Fr = FTB.nufft_type1!(FTB.allocate_modes(pr), pr, f)
 size(Fr), FTB.mode_frequencies(pr, 1)
 ```
 
+## Library options
+
+A backend tag carries the options of its library alone. FINUFFT and NonuniformFFTs plan their host FFT
+with FFTW, and take its planner flags as `fftw_flags`: `FFTW.ESTIMATE` builds at once, for a plan executed
+a few times; `FFTW.MEASURE` times candidate FFTs, a slower build for a faster execution. `nothing` keeps the
+library's default. A device plan's FFT takes no FFTW flags.
+
+```@example nufft
+using FFTW: FFTW
+
+once = FTB.plan_nufft(FTB.NonuniformFFTsBackend(; fftw_flags = FFTW.ESTIMATE), ComplexF64, (x, y), (16, 12))
+F1 = FTB.nufft_type1!(FTB.allocate_modes(once), once, c)
+FTB.close!(once)
+size(F1)
+```
+
 ## A plan's lifetime
 
 - [`set_nodes!`](@ref) moves a plan to new points, whose count may differ.
@@ -98,6 +114,5 @@ nthreads
 tolerance
 mode_size
 mode_frequencies
-plan_type
 oversampled_spectra
 ```

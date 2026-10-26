@@ -28,9 +28,10 @@ end
 FTB._allocate_nodes(::FTB.FINUFFTBackend, ::Type{R}, M::Int, ::CUDA.AnyCuVector) where {R} =
     CUDA.CuVector{R}(undef, M)
 
-function FTB._build(::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
+function FTB._build(backend::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,V}) where {T,D,R,V<:CUDA.CuVector{R}}
-    ms = collect(Int64, FTB._mode_size(T, spec.nmodes))
+    FTB._check_device_flags(backend)
+    ms = collect(Int64, FTB.packed_size(T, spec.nmodes))
     p1 = _makeplan(1, ms, spec.iflag, spec)
     p2 = try
         _makeplan(2, ms, -spec.iflag, spec)

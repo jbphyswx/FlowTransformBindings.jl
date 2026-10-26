@@ -31,8 +31,8 @@ end
 Test.@testset "layout" begin
     Test.@testset "axes are FFTW's frequencies" begin
         for n in (1, 2, 7, 8, 16, 17), L in (2π, 1.0, 3.5)
-            ks_f = FTB.wavenumber_axes((L,), (n,), Val(false))
-            ks_h = FTB.wavenumber_axes((L,), (n,), Val(true))
+            ks_f = FTB.wavenumber_axes(ComplexF64, (L,), (n,))
+            ks_h = FTB.wavenumber_axes(Float64, (L,), (n,))
             Test.@test collect(ks_f[1]) ≈ FFTW.fftfreq(n, n * 2π / L)
             Test.@test collect(ks_h[1]) ≈ FFTW.rfftfreq(n, n * 2π / L)
             Test.@test [FTB.mode_frequency(ks_f[1], i) for i in 1:n] == Int.(FFTW.fftfreq(n, n))
@@ -40,10 +40,11 @@ Test.@testset "layout" begin
             Test.@test FTB.max_abs(ks_f[1]) == maximum(abs, collect(ks_f[1])) == FTB.max_abs(ks_h[1])
         end
         Test.@test_throws BoundsError FTB.FFTAxis(4, 1.0)[5]
-        ks = FTB.wavenumber_axes((2π, 2π, 2π), (8, 6, 4), Val(true))
+        ks = FTB.wavenumber_axes(Float64, (2π, 2π, 2π), (8, 6, 4))
         Test.@test FTB.full_size(ks) == (8, 6, 4)
-        Test.@test FTB.spectral_size(ks) == (5, 6, 4) == FTB.packed_size((8, 6, 4), Val(true))
-        Test.@test eltype(FTB.wavenumber_axes((1.0f0, 2), (4, 4), Val(true))[2]) === Float32
+        Test.@test FTB.spectral_size(ks) == (5, 6, 4) == FTB.packed_size(Float64, (8, 6, 4))
+        Test.@test FTB.packed_size(ComplexF32, (8, 6, 4)) == (8, 6, 4)
+        Test.@test eltype(FTB.wavenumber_axes(Float64, (1.0f0, 2), (4, 4))[2]) === Float32
         # A plain vector of wavenumbers reads as a full axis.
         Test.@test !FTB.is_halved((collect(FFTW.fftfreq(8)),))
         Test.@test FTB.full_size((collect(FFTW.fftfreq(8)),)) == (8,)
@@ -86,8 +87,8 @@ Test.@testset "layout" begin
             nd = length(ns)
             Np = prod(ns)
             Ls = ntuple(d -> 2π * (1 + 0.25d), nd)
-            ks_f = FTB.wavenumber_axes(Ls, ns, Val(false))
-            ks_h = FTB.wavenumber_axes(Ls, ns, Val(true))
+            ks_f = FTB.wavenumber_axes(ComplexF64, Ls, ns)
+            ks_h = FTB.wavenumber_axes(Float64, Ls, ns)
             u = randn(ns...)
             N = u .^ 2 .- sum(u .^ 2) / Np
             û_f = FFTW.fft(u) ./ Np
@@ -106,12 +107,16 @@ Test.@testset "layout" begin
         end
     end
 
-    Test.@testset "the packed half unpacks to the full FFT" begin
+    Test.@testset "the packed half unpacks to the full FFT, on the host and a device" begin
         Random.seed!(12)
+        JLArrays.allowscalar(false)
         for ns in LAYOUT_SIZES
             u = randn(ns..., 2)                      # a trailing batch axis rides along
-            full = FTB.unpacked(FFTW.rfft(u, 1:length(ns)), ns)
+            half = FFTW.rfft(u, 1:length(ns))
+            full = FTB.unpacked(half, ns)
             Test.@test full ≈ FFTW.fft(u, 1:length(ns)) rtol = 1e-13
+            dev = FTB.unpacked(JLArrays.JLArray(half), ns)
+            Test.@test dev isa JLArrays.JLArray && Array(dev) == full
         end
     end
 
@@ -128,7 +133,7 @@ Test.@testset "layout" begin
         M = n1 * n2
         C(k1, k2) = sum(f .* cis.(-(k1 .* X .+ k2 .* Y))) / M
         ms = (n1, n2)
-        pms = FTB.packed_size(ms, Val(true))
+        pms = FTB.packed_size(Float64, ms)
         ns = FTB.hermitian_request_size(ms)
         Test.@test ns == (n1 + 1, n2)
         freqs(n) = [FTB.mode_frequency(FTB.FFTAxis(n, 1.0), i) for i in 1:n]
@@ -146,7 +151,7 @@ Test.@testset "layout" begin
         Test.@test !(C(1, n2 ÷ 2) ≈ C(1, -(n2 ÷ 2)))     # two modes on these samples
         Test.@test isempty(FTB.outside_modes(ms, box))
         half = [C(k1, k2) for k1 in 0:(n1 ÷ 2), k2 in freqs(box[2])]
-        ks = FTB.wavenumber_axes((2π, 2π), box, Val(true))
+        ks = FTB.wavenumber_axes(Float64, (2π, 2π), box)
         Test.@test FTB.spectral_size(ks) == size(half)
         Test.@test FTB.unpacked(half, box) ≈ [C(k1, k2) for k1 in freqs(n1), k2 in freqs(box[2])] rtol = 1e-12
         # Summed with the fold weights, the half gives the energy of the whole box.
@@ -160,8 +165,8 @@ Test.@testset "layout" begin
         ms = (6, 8, 4)
         box = FTB.box_size(ms, (true, true, true))
         Test.@test box == (7, 9, 5)
-        pbs = FTB.packed_size(box, Val(true))
-        Test.@test pbs[1] == FTB.packed_size(ms, Val(true))[1]
+        pbs = FTB.packed_size(Float64, box)
+        Test.@test pbs[1] == FTB.packed_size(Float64, ms)[1]
         k(d, i) = FTB.mode_frequency(FTB.FFTAxis(box[d], 1.0), i)
         expected = [i for (i, I) in enumerate(CartesianIndices(pbs))
                     if (k(2, I[2]), k(3, I[3])) in ((4, -2), (-4, 2))]
@@ -243,10 +248,10 @@ Test.@testset "layout" begin
         for ns in LAYOUT_SIZES
             nd = length(ns)
             Ms = map(FTB.padded_length, ns)
-            for R in (true, false)
-                ks = FTB.wavenumber_axes(ntuple(_ -> 2π, nd), ns, Val(R))
+            for T in (Float64, ComplexF64)
+                ks = FTB.wavenumber_axes(T, ntuple(_ -> 2π, nd), ns)
                 u = randn(ns...)
-                c = reshape(R ? FFTW.rfft(u) : FFTW.fft(u), FTB.spectral_size(ks)..., 1)
+                c = reshape(T <: Real ? FFTW.rfft(u) : FFTW.fft(u), FTB.spectral_size(ks)..., 1)
                 pm = FTB.PaddedMaps(zeros(1), Float64, ks, Ms)
                 Msp = FTB.spectral_size(FTB.padded_axes(ks, Ms))
                 p = FTB.padded_embed!(zeros(ComplexF64, Msp..., 1), c, pm)

@@ -77,8 +77,8 @@ function lsmr_adjoint! end
 """
     lsmr_range_norm2!(out, op, u, n) -> out
 
-`out[k] = ‖u[:, k]‖²` in the inner product of the range of `op`, for the columns `k = 1:n`, into a host
-vector; Euclidean unless `op` has a method. An operator whose range is divided among processes sums the
+`out[k] = ‖u[:, k]‖²` in the inner product of the range of `op`, for the columns `k = 1:n`, into a vector
+on the device of `u`; Euclidean unless `op` has a method. An operator whose range is divided among processes sums the
 parts here and in [`lsmr_adjoint!`](@ref).
 """
 lsmr_range_norm2!(out, op, u, n) = colnorm2!(out, u, n, lsmr_ncolumns(op))
@@ -86,8 +86,8 @@ lsmr_range_norm2!(out, op, u, n) = colnorm2!(out, u, n, lsmr_ncolumns(op))
 """
     lsmr_domain_norm2!(out, op, v, n) -> out
 
-`out[k] = ‖v[:, k]‖²` in the inner product of the domain of `op`, for the columns `k = 1:n`, into a host
-vector; Euclidean unless `op` has a method.
+`out[k] = ‖v[:, k]‖²` in the inner product of the domain of `op`, for the columns `k = 1:n`, into a vector
+on the device of `v`; Euclidean unless `op` has a method.
 """
 lsmr_domain_norm2!(out, op, v, n) = colnorm2!(out, v, n, lsmr_ncolumns(op))
 
@@ -115,7 +115,7 @@ end
 """
     colnorm2!(out, A, n, B) -> out
 
-`out[k] = ‖A[:, k]‖²` for the first `n` of the `B` columns of `A`, into a host vector.
+`out[k] = ‖A[:, k]‖²` for the first `n` of the `B` columns of `A`, into a vector on the device of `A`.
 """
 function colnorm2!(out::AbstractVector, A::AbstractArray, n::Integer, B::Integer)
     len = length(A) ÷ B
@@ -228,7 +228,8 @@ struct _LSMRTolerances{T<:AbstractFloat}
     noise::T
 end
 
-# The scalars of one column, in the notation of Fong & Saunders §§2–5.
+# The scalars of one column, in the notation of Fong & Saunders §§2–5, with this iteration's `α` and the
+# coefficients of `h̄ ← h + ch̄ h̄`, `x ← x + cx h̄`, `h ← v + ch h`.
 struct _LSMRState{T<:AbstractFloat}
     ᾱ::T
     ρ::T
@@ -254,7 +255,16 @@ struct _LSMRState{T<:AbstractFloat}
     condA::T
     iters::Int
     status::LSMRStatus
+    α::T
+    ch̄::T
+    cx::T
+    ch::T
 end
+
+@inline _neg_α(st::_LSMRState) = -st.α
+@inline _ch̄(st::_LSMRState) = st.ch̄
+@inline _cx(st::_LSMRState) = st.cx
+@inline _ch(st::_LSMRState) = st.ch
 
 # The state after the first bidiagonalization step, `β₁ = ‖b‖`, `α₁ = ‖A†b‖/β₁`.
 function _lsmr_init(α::T, β::T) where {T<:AbstractFloat}
@@ -263,11 +273,10 @@ function _lsmr_init(α::T, β::T) where {T<:AbstractFloat}
     return _LSMRState{T}(α, one(T), one(T), one(T), zero(T), zero(T), normar,
                          β, zero(T), one(T), zero(T), zero(T), zero(T),
                          α * α, zero(T), T(Inf), β, normar,
-                         β, normar, α, one(T), 0, status)
+                         β, normar, α, one(T), 0, status, α, zero(T), zero(T), zero(T))
 end
 
-# One iteration on this iteration's bidiagonalization norms `α`, `β`: the new state and the
-# coefficients of `h̄ ← h + ch̄ h̄`, `x ← x + cx h̄`, `h ← v + ch h`.
+# One iteration on this iteration's bidiagonalization norms `α`, `β`: the new state.
 function _lsmr_step(st::_LSMRState{T}, α::T, β::T, tol::_LSMRTolerances{T}) where {T}
     ĉ, ŝ, α̂ = _sym_ortho(st.ᾱ, tol.damp)
     ρold = st.ρ
@@ -288,9 +297,9 @@ function _lsmr_step(st::_LSMRState{T}, α::T, β::T, tol::_LSMRTolerances{T}) wh
     if iszero(ρ) || iszero(ρ̄)
         status = iszero(β) ? LSMR_RESIDUAL : LSMR_OPTIMAL
         normr = iszero(β) ? zero(T) : st.normr
-        return (_LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, st.β̈, st.β̇, st.ρ̇old, st.τ̃old, st.θ̃, st.d,
-                              st.normA2, st.maxρ̄, st.minρ̄, st.normb, st.normar0, normr, abs(ζ̄),
-                              st.normA, st.condA, iters, status), zero(T), zero(T), zero(T))
+        return _LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, st.β̈, st.β̇, st.ρ̇old, st.τ̃old, st.θ̃, st.d,
+                             st.normA2, st.maxρ̄, st.minρ̄, st.normb, st.normar0, normr, abs(ζ̄),
+                             st.normA, st.condA, iters, status, α, zero(T), zero(T), zero(T))
     end
 
     ch̄ = -(θ̄ * ρ / (ρold * ρ̄old))
@@ -320,9 +329,8 @@ function _lsmr_step(st::_LSMRState{T}, α::T, β::T, tol::_LSMRTolerances{T}) wh
     normar = abs(ζ̄)
 
     status = _lsmr_status(normr, normar, normA, condA, st.normb, st.normar0, tol)
-    return (_LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, β̈, β̇, ρ̇old, τ̃old, θ̃, d, normA2, maxρ̄, minρ̄,
-                          st.normb, st.normar0, normr, normar, normA, condA, iters, status),
-            ch̄, cx, ch)
+    return _LSMRState{T}(ᾱ, ρ, ρ̄, c̄, s̄, ζ, ζ̄, β̈, β̇, ρ̇old, τ̃old, θ̃, d, normA2, maxρ̄, minρ̄,
+                         st.normb, st.normar0, normr, normar, normA, condA, iters, status, α, ch̄, cx, ch)
 end
 
 # The tests of Fong & Saunders §6 in their order of precedence, the later assignment winning, with the
@@ -355,22 +363,21 @@ After a solve, the vectors `status`, `iterations`, `residual` (`max(‖A†r‖ 
 `normar`, `normA` (the Frobenius norm of the bidiagonalization, a bound on `‖A‖`) and `condA` (an
 estimate of `cond(A)`) hold each column's outcome.
 """
-struct LSMRWorkspace{T<:AbstractFloat, D<:AbstractArray, R<:AbstractArray, C<:AbstractVector{T}, VT <: AbstractVector{T}, VI <: AbstractVector{<:Integer}, VLSMRS <: AbstractVector{<:LSMRStatus}, VLSMRST <: AbstractVector{<:_LSMRState{T}}}
+struct LSMRWorkspace{T<:AbstractFloat, D<:AbstractArray, R<:AbstractArray, C<:AbstractVector{T},
+                     S<:AbstractVector{_LSMRState{T}}, VT<:AbstractVector{T}, VI<:AbstractVector{<:Integer},
+                     VLSMRS<:AbstractVector{<:LSMRStatus}, VLSMRST<:AbstractVector{_LSMRState{T}}}
     x::D
     v::D
     h::D
     h̄::D
     u::R
-    c1::C
-    c2::C
-    c3::C
-    c1_host::VT
-    c2_host::VT
-    c3_host::VT
-    norm2::VT
-    α::VT
-    β::VT
-    states::VLSMRST
+    # One entry per column on the device of the stacks; `states_host` is the copy the stopping tests read.
+    c::C
+    norm2::C
+    α::C
+    β::C
+    states::S
+    states_host::VLSMRST
     perm::VI
     status::VLSMRS
     iterations::VI
@@ -389,22 +396,25 @@ function LSMRWorkspace(op)
     (length(x) % B == 0 && length(u) % B == 0) || throw(DimensionMismatch(
         "stacks of $(length(x)) and $(length(u)) values do not divide into $B columns"))
     T = real(eltype(x))
-    coef() = fill!(similar(x, T, B), zero(T))
-    c1, c2, c3 = coef(), coef(), coef()
+    col() = fill!(similar(x, T, B), zero(T))
     host() = zeros(T, B)
-    states = fill(_lsmr_init(zero(T), zero(T)), B)
+    states = fill!(similar(x, _LSMRState{T}, B), _lsmr_init(zero(T), zero(T)))
+    states_host = _host_side(states)
+    c = col()
     status = fill(LSMR_RUNNING, B)
-    return LSMRWorkspace{T, typeof(x), typeof(u), typeof(c1), Vector{T}, Vector{Int}, typeof(status),
-                         typeof(states)}(
+    return LSMRWorkspace{T, typeof(x), typeof(u), typeof(c), typeof(states), Vector{T}, Vector{Int},
+                         typeof(status), typeof(states_host)}(
         x, lsmr_allocate_domain(op), lsmr_allocate_domain(op), lsmr_allocate_domain(op), u,
-        c1, c2, c3, _host_side(c1), _host_side(c2), _host_side(c3), host(), host(), host(),
-        states, collect(1:B), status, zeros(Int, B), host(), host(), host(), host(), host())
+        c, col(), col(), col(), states, states_host,
+        collect(1:B), status, zeros(Int, B), host(), host(), host(), host(), host())
 end
 
-# A host coefficient vector is its own host side.
+# A host vector is its own host side.
 _host_side(c::Vector) = c
-_host_side(c::AbstractVector{T}) where {T} = zeros(T, length(c))
-_to_device!(c, h) = c === h ? c : copyto!(c, h)
+_host_side(c::AbstractVector{T}) where {T} = Vector{T}(undef, length(c))
+_to_host!(h, c, n) = c === h ? h : copyto!(h, 1, c, 1, n)
+_to_device!(c, h, n) = c === h ? c : copyto!(c, 1, h, 1, n)
+_first(a::AbstractVector, n::Int) = view(a, 1:n)
 
 Base.show(io::IO, ws::LSMRWorkspace{T}) where {T} =
     print(io, "LSMRWorkspace{", T, "}(", length(ws.perm), " columns of ", length(ws.x) ÷ length(ws.perm),
@@ -435,21 +445,21 @@ function lsmr!(X, op, b::AbstractArray, ws::LSMRWorkspace{T}; maxiter::Integer,
         throw(ArgumentError("tolerances, conlim and damp must be nonnegative"))
     tol = _LSMRTolerances{T}(T(damp), T(atol), T(btol), conlim > 0 ? inv(T(conlim)) : zero(T),
                              T(rtol), T(noise))
-    x, v, h, h̄, u = ws.x, ws.v, ws.h, ws.h̄, ws.u
+    x, v, h, h̄, u, c = ws.x, ws.v, ws.h, ws.h̄, ws.u, ws.c
 
     copyto!(u, b)
     lsmr_range_norm2!(ws.norm2, op, u, B)
-    _normalizers!(ws.β, ws, B)
-    colscale!(u, ws.c1, B, B)
+    _normalizers!(ws.β, c, ws.norm2, B)
+    colscale!(u, c, B, B)
     lsmr_adjoint!(v, op, u, nothing, B)
     lsmr_domain_norm2!(ws.norm2, op, v, B)
-    _normalizers!(ws.α, ws, B)
-    colscale!(v, ws.c1, B, B)
+    _normalizers!(ws.α, c, ws.norm2, B)
+    colscale!(v, c, B, B)
     fill!(x, zero(eltype(x)))
     fill!(h̄, zero(eltype(h̄)))
     copyto!(h, v)
+    ws.states .= _lsmr_init.(ws.α, ws.β)
     @inbounds for k in 1:B
-        ws.states[k] = _lsmr_init(ws.α[k], ws.β[k])
         ws.perm[k] = k
     end
 
@@ -457,31 +467,26 @@ function lsmr!(X, op, b::AbstractArray, ws::LSMRWorkspace{T}; maxiter::Integer,
     iter = 0
     while n > 0 && iter < maxiter
         iter += 1
-        _scaled!(ws.c1, ws.c1_host, ws.α, -one(T), n)
-        lsmr_forward!(u, op, v, ws.c1, n)
+        st = _first(ws.states, n)
+        _first(c, n) .= _neg_α.(st)
+        lsmr_forward!(u, op, v, c, n)
         lsmr_range_norm2!(ws.norm2, op, u, n)
-        _normalizers!(ws.β, ws, n)
-        colscale!(u, ws.c1, n, B)
+        _normalizers!(ws.β, c, ws.norm2, n)
+        colscale!(u, c, n, B)
 
-        _scaled!(ws.c1, ws.c1_host, ws.β, -one(T), n)
-        lsmr_adjoint!(v, op, u, ws.c1, n)
+        _first(c, n) .= .-_first(ws.β, n)
+        lsmr_adjoint!(v, op, u, c, n)
         lsmr_domain_norm2!(ws.norm2, op, v, n)
-        _normalizers!(ws.α, ws, n)
-        colscale!(v, ws.c1, n, B)
+        _normalizers!(ws.α, c, ws.norm2, n)
+        colscale!(v, c, n, B)
 
-        @inbounds for k in 1:n
-            st, ch̄, cx, ch = _lsmr_step(ws.states[k], ws.α[k], ws.β[k], tol)
-            ws.states[k] = st
-            ws.c1_host[k] = ch̄
-            ws.c2_host[k] = cx
-            ws.c3_host[k] = ch
-        end
-        _to_device!(ws.c1, ws.c1_host)
-        _to_device!(ws.c2, ws.c2_host)
-        _to_device!(ws.c3, ws.c3_host)
-        colxpby!(h̄, h, ws.c1, n, B)
-        colaxpy!(x, ws.c2, h̄, n, B)
-        colxpby!(h, v, ws.c3, n, B)
+        st .= _lsmr_step.(st, _first(ws.α, n), _first(ws.β, n), (tol,))
+        _first(c, n) .= _ch̄.(st)
+        colxpby!(h̄, h, c, n, B)
+        _first(c, n) .= _cx.(st)
+        colaxpy!(x, c, h̄, n, B)
+        _first(c, n) .= _ch.(st)
+        colxpby!(h, v, c, n, B)
         n = _retire!(X, op, ws, n, LSMR_RUNNING)
     end
     _retire!(X, op, ws, n, LSMR_MAXITER)
@@ -489,31 +494,27 @@ function lsmr!(X, op, b::AbstractArray, ws::LSMRWorkspace{T}; maxiter::Integer,
             residual = maximum(ws.residual))
 end
 
-# `dst[k] = √norm2[k]` and `c1[k] = 1/dst[k]` (0 for a zero norm) over the first `n` columns.
-function _normalizers!(dst::AbstractVector{T}, ws::LSMRWorkspace{T}, n::Int) where {T}
-    @inbounds for k in 1:n
-        s = sqrt(max(ws.norm2[k], zero(T)))
-        dst[k] = s
-        ws.c1_host[k] = s > 0 ? inv(s) : zero(T)
-    end
-    return _to_device!(ws.c1, ws.c1_host)
+# `nrm[k] = √norm2[k]` and `c[k] = 1/nrm[k]` (0 for a zero norm) over the first `n` columns.
+function _normalizers!(nrm::AbstractVector{T}, c::AbstractVector{T}, norm2::AbstractVector{T}, n::Int) where {T}
+    s = _first(nrm, n)
+    s .= sqrt.(max.(_first(norm2, n), zero(T)))
+    _first(c, n) .= _inv_or_zero.(s)
+    return c
 end
 
-function _scaled!(c, h::AbstractVector{T}, src::AbstractVector{T}, s::T, n::Int) where {T}
-    @inbounds for k in 1:n
-        h[k] = s * src[k]
-    end
-    return _to_device!(c, h)
-end
+@inline _inv_or_zero(s) = s > 0 ? inv(s) : zero(s)
 
 # Write out each stopped column among the first `n`, taking `fallback` as the status of a running one,
-# and move the rest to the front with their vectors, state and `α`; `perm[s]` is the caller's column in
-# slot `s`, and swapping keeps `perm` a permutation of `1:B`.
+# and move the rest to the front with their vectors and state; `perm[s]` is the caller's column in slot
+# `s`, and swapping keeps `perm` a permutation of `1:B`. The states are read once and written back only
+# when a running column moved.
 function _retire!(X, op, ws::LSMRWorkspace, n::Int, fallback::LSMRStatus)
     B = length(ws.perm)
+    states = _to_host!(ws.states_host, ws.states, n)
     w = 0
+    moved = false
     @inbounds for s in 1:n
-        st = ws.states[s]
+        st = states[s]
         status = st.status == LSMR_RUNNING ? fallback : st.status
         if status != LSMR_RUNNING
             j = ws.perm[s]
@@ -527,11 +528,12 @@ function _retire!(X, op, ws::LSMRWorkspace, n::Int, fallback::LSMRStatus)
                 colcopy!(A, w, A, s, B)
             end
             colcopy!(ws.u, w, ws.u, s, B)
-            ws.states[w] = st
-            ws.α[w] = ws.α[s]
+            states[w] = st
             ws.perm[w], ws.perm[s] = ws.perm[s], ws.perm[w]
+            moved = true
         end
     end
+    moved && _to_device!(ws.states, states, w)
     return w
 end
 
@@ -660,8 +662,9 @@ point from the fit, whatever `b` holds there (a masked value, `NaN` or `Inf`). T
 go through `op`'s own, on `√w ∘ u` and `w ∘ u`, so a range divided among processes sums its parts as
 before.
 
-Where `w` makes `A^H W A` close to a multiple of the identity — the quadrature weights of the points, or
-their Voronoi areas — the iteration count falls to the handful a well-conditioned system needs.
+Weights that approximate a quadrature of the points, as their Voronoi areas do, bring `A^H W A` nearer a
+multiple of the identity than `A^H A`, and the fit takes fewer iterations. At random points the
+conditioning is set mostly by the number of points per unknown, which no weighting changes.
 """
 struct RangeWeighted{O, W<:AbstractArray, R<:AbstractArray}
     op::O
@@ -678,6 +681,18 @@ function RangeWeighted(op, w::AbstractArray)
     all(x -> x >= 0 && isfinite(x), w) || throw(ArgumentError("range weights must be nonnegative and finite"))
     s = sqrt.(w)
     return RangeWeighted(op, s, copyto!(similar(s), w), t)
+end
+
+"""
+    RangeWeighted(op, p::RangeWeighted)
+
+`op` with the weights of `p`, sharing `p`'s arrays: `op` acts on the range `p.op` acts on, as a
+process's share of a range divided among processes does.
+"""
+function RangeWeighted(op, p::RangeWeighted)
+    lsmr_ncolumns(op) == lsmr_ncolumns(p.op) || throw(DimensionMismatch(
+        "the operator has $(lsmr_ncolumns(op)) columns; the weighted one $(lsmr_ncolumns(p.op))"))
+    return RangeWeighted(op, p.sqrtw, p.w, p.t)
 end
 
 Base.show(io::IO, p::RangeWeighted) = print(io, "RangeWeighted(", p.op, ")")

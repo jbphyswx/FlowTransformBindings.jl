@@ -6,16 +6,15 @@ using GPUArraysCore: GPUArraysCore
 FTB._is_device(::GPUArraysCore.AnyGPUArray) = true
 
 # The column primitives of `FTB.lsmr!` as broadcasts and reductions over the first `n` columns, which a
-# device array runs as kernels; a reduction's result reaches the host vector through one copy.
+# device array runs as kernels; a reduction writes `out`, on the device of `A`.
 _cols(A, n, B) = view(reshape(A, :, B), :, 1:n)
 _cols(A, ks::UnitRange{Int}, len) = view(reshape(A, len, :), :, ks)
 _coef(c, n) = reshape(view(c, 1:n), 1, :)
-
-_to_host!(out, r, n) = copyto!(out, 1, Array(r), 1, n)
+_row(out, n) = view(reshape(out, 1, :), :, 1:n)
 
 function FTB.colnorm2!(out::AbstractVector, A::GPUArraysCore.AnyGPUArray, n::Integer, B::Integer)
     n == 0 && return out
-    _to_host!(out, sum(abs2.(_cols(A, n, B)); dims = 1), n)
+    sum!(abs2, _row(out, n), _cols(A, n, B))
     return out
 end
 
@@ -39,7 +38,7 @@ end
 function FTB._row1norm2!(out::AbstractVector, A::GPUArraysCore.AnyGPUArray, n1::Integer, n::Integer,
                          B::Integer)
     n == 0 && return out
-    _to_host!(out, sum(abs2.(view(reshape(A, n1, :, B), 1, :, 1:n)); dims = 1), n)
+    sum!(abs2, _row(out, n), view(reshape(A, n1, :, B), 1, :, 1:n))
     return out
 end
 

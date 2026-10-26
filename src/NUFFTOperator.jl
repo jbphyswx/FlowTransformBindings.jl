@@ -19,7 +19,7 @@ function NUFFTOperator(plan::AbstractNUFFTPlan{T}) where {T}
     B = ntrans(plan)
     t = _zeros(like, T, (npoints(plan), B))
     w = _zeros(like, Complex{real(T)}, (mode_size(plan)..., B))
-    return NUFFTOperator(plan, t, w, zeros(real(T), B))
+    return NUFFTOperator(plan, t, w, _zeros(like, real(T), (B,)))
 end
 
 Base.show(io::IO, op::NUFFTOperator) = print(io, "NUFFTOperator(", op.plan, ")")
@@ -42,9 +42,8 @@ function lsmr_domain_norm2!(out, op::NUFFTOperator{<:AbstractNUFFTPlan{<:Real}},
     B = lsmr_ncolumns(op)
     colnorm2!(out, v, n, B)
     _row1norm2!(op.row, v, size(op.w, 1), n, B)
-    @inbounds for k in 1:n
-        out[k] = 2 * out[k] - op.row[k]
-    end
+    o = view(out, 1:n)
+    o .= 2 .* o .- view(op.row, 1:n)
     return out
 end
 
