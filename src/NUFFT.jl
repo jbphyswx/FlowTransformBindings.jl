@@ -317,6 +317,15 @@ function task_local_plan(p::AbstractNUFFTPlan{T}) where {T}
 end
 
 """
+    plan_type(P, ntrans) -> Type
+
+The type of the plan `plan_nufft` returns for `ntrans` fields, given the type `P` of one built with its
+other arguments, derived without building a plan: `P` itself where the library holds the transform
+count at runtime.
+"""
+plan_type(::Type{P}, ::Integer) where {P<:AbstractNUFFTPlan} = P
+
+"""
     oversampled_spectra(plan) -> (spectra, normfactor, phis)
 
 The oversampled type-1 spectra the plan's last execution computed, one per transform, in FFT order,

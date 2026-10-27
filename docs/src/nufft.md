@@ -114,5 +114,6 @@ nthreads
 tolerance
 mode_size
 mode_frequencies
+plan_type
 oversampled_spectra
 ```

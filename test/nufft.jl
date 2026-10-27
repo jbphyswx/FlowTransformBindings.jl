@@ -254,6 +254,20 @@ Test.@testset "FFTW planner flags on the backend tag: $Tag" for Tag in (FTB.FINU
                                                    (JLArrays.JLArray(2π .* rand(rng, 20)),), (8,))
 end
 
+# Every pair of counts, one of them equal to the dimension, at both thread counts a NonuniformFFTs plan
+# takes, with and without planner flags on the tag.
+Test.@testset "plan_type is the type of the plan at another transform count" begin
+    xs = (rand(Random.Xoshiro(11), 30) .* 2π, rand(Random.Xoshiro(12), 30) .* 2π)
+    for backend in (NU_BACKENDS..., FTB.NonuniformFFTsBackend(; fftw_flags = FFTW.ESTIMATE)),
+        T in (ComplexF64, Float64), nt in unique((1, Threads.nthreads()))
+        ps = Dict(B => FTB.plan_nufft(backend, T, xs, (9, 8); ntrans = B, nthreads = nt) for B in (1, 2, 3, 5))
+        for a in keys(ps), b in keys(ps)
+            Test.@test FTB.plan_type(typeof(ps[a]), b) === typeof(ps[b])
+        end
+        foreach(FTB.close!, values(ps))
+    end
+end
+
 Test.@testset "Arguments a plan cannot take" begin
     xs = (rand(Random.Xoshiro(7), 20),)
     Test.@test_throws ArgumentError FTB.plan_nufft(SB.NUFFTSpectralBackend(), ComplexF64, xs, (8,))

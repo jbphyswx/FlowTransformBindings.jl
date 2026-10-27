@@ -105,4 +105,36 @@ function FTB.oversampled_spectra(p::NonuniformFFTsPlan{<:Real})
     return data.ûs, normfactor, map(NonuniformFFTs.fourier_coefficients, p.plan.kernels)
 end
 
+# `PlanNUFFT` carries the transform count as its type parameter 3, and again inside its data and block
+# types (its parameters 10 and 11): each holds the count as its own parameter 3, and per-transform
+# `NTuple` members from parameter 5 on. Parameter 4 of `RealNUFFTData` is a `D`-tuple of frequencies, an
+# `NTuple` whose length is the dimension, so the rewrite starts at 5.
+_retype_count(@nospecialize(x), old::Int, k::Int) = x
+_retype_count(::Type{NTuple{N,X}}, old::Int, k::Int) where {N,X} = N == old ? NTuple{k,X} : NTuple{N,X}
+_retype_count(::Type{Vector{NTuple{N,X}}}, old::Int, k::Int) where {N,X} =
+    N == old ? Vector{NTuple{k,X}} : Vector{NTuple{N,X}}
+
+function _inner_at_width(@nospecialize(Q::Type), old::Int, k::Int)
+    q = collect(Q.parameters)
+    length(q) >= 3 || return Q          # `NullBlockData`, the unblocked layout, carries no count
+    q[3] = k
+    for i in 5:length(q)
+        q[i] = _retype_count(q[i], old, k)
+    end
+    return Base.typename(Q).wrapper{q...}
+end
+
+function _plan_at_width(@nospecialize(P::Type), k::Int)
+    p = collect(P.parameters)
+    old = p[3]::Int
+    old == k && return P
+    p[3] = k
+    p[10] = _inner_at_width(p[10], old, k)
+    p[11] = _inner_at_width(p[11], old, k)
+    return Base.typename(P).wrapper{p...}
+end
+
+FTB.plan_type(::Type{NonuniformFFTsPlan{T,D,R,B,S,F,V,P}}, k::Integer) where {T,D,R,B,S,F,V,P} =
+    NonuniformFFTsPlan{T,D,R,Int(k),S,F,V,_plan_at_width(P, Int(k))}
+
 end # module FlowTransformBindingsNonuniformFFTsExt
