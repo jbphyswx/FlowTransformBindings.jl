@@ -21,7 +21,9 @@ mutable struct NonuniformFFTsPlan{T, D, R, B, S<:FTB.NUFFTSpec{D,R}, F<:Union{No
     closed::Bool
 end
 
-_ka_backend(like::AbstractArray) = FTB._is_device(like) ? NonuniformFFTs.KA.get_backend(like) : NonuniformFFTs.KA.CPU()
+# NonuniformFFTs' own host backend: under KernelAbstractions 0.10 `KA.CPU()` is POCL, which NonuniformFFTs
+# runs through its device path.
+_ka_backend(like::AbstractArray) = FTB._is_device(like) ? NonuniformFFTs.KA.get_backend(like) : NonuniformFFTs.CPU()
 
 FTB._allocate_nodes(::FTB.NonuniformFFTsBackend, ::Type{R}, M::Int, like::AbstractVector) where {R} =
     NonuniformFFTs.KA.allocate(_ka_backend(like), R, M)
@@ -41,8 +43,8 @@ _default_upsampfac(tol::Real, nmodes::Tuple) = max(2.0, 2 * _halfsupport_count(t
 
 # On the host NonuniformFFTs spreads over blocks of points on `Threads.nthreads()` threads, or serially
 # with blocking off.
-function _blocked(backend::NonuniformFFTs.KA.Backend, nthreads::Int)
-    backend isa NonuniformFFTs.KA.GPU && return true
+function _blocked(backend, nthreads::Int)
+    backend isa NonuniformFFTs.GPU && return true
     nthreads == Threads.nthreads() && return true
     nthreads == 1 && return false
     throw(ArgumentError("NonuniformFFTsBackend runs on 1 thread or on Threads.nthreads() = " *
@@ -52,7 +54,7 @@ end
 function FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
                     nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}}
     backend = _ka_backend(first(nodes))
-    backend isa NonuniformFFTs.KA.GPU && FTB._check_device_flags(tag)
+    backend isa NonuniformFFTs.GPU && FTB._check_device_flags(tag)
     σ = spec.upsampfac === nothing ? _default_upsampfac(spec.tol, spec.nmodes) : spec.upsampfac
     kw = (; ntransforms = Val(spec.ntrans), m = _halfsupport(spec.tol, σ), σ,
             fftshift = spec.order isa FTB.CenteredModes, sort_points = NonuniformFFTs.True(), backend,
