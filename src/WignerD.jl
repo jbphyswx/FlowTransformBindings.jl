@@ -88,20 +88,21 @@ The step `d^{ℓ+1} = (αx + β) d^ℓ − γ d^{ℓ−1}` from degree `ℓ` in 
     c₊ D = (ℓ+1) ℓ²(m−n)² / (ℓ² − mn + a) + ℓ (ℓ+1)²(m−n)² / ((ℓ+1)² − mn + b),
     c₋ D = −(ℓ+1) ℓ²(m+n)² / (ℓ² + mn + a) − ℓ (ℓ+1)²(m+n)² / ((ℓ+1)² + mn + b),
 
-sums of terms of one sign, so each is accurate to `eps(F)` relative to itself.
+sums of terms of one sign, so each is accurate to `eps(F)` relative to itself. Every integer combination
+of `ℓ`, `m`, `n` (`ℓ² − m² = (ℓ−m)(ℓ+m)`, `ℓ² ∓ mn`) is formed exactly before its one rounding into `F`.
 """
 @inline function wigner_d_coeffs(::Type{F}, ℓ::Int, m::Int, n::Int) where {F}
     ℓ == 0 && return (one(F), zero(F), zero(F), zero(F), zero(F))
-    l = F(ℓ); L = F(ℓ + 1); mn = F(m) * F(n); m2 = F(m)^2; n2 = F(n)^2
-    a = sqrt(max(l^2 - m2, zero(F)) * max(l^2 - n2, zero(F)))
-    b = sqrt((L^2 - m2) * (L^2 - n2))
+    l = F(ℓ); L = F(ℓ + 1)
+    a = sqrt(F(max((ℓ - m) * (ℓ + m), 0)) * F(max((ℓ - n) * (ℓ + n), 0)))
+    b = sqrt(F((ℓ + 1 - m) * (ℓ + 1 + m)) * F((ℓ + 1 - n) * (ℓ + 1 + n)))
     D = l * b
     α = F(2ℓ + 1) * l * L / D
-    β = -F(2ℓ + 1) * mn / D
+    β = -F(2ℓ + 1) * F(m * n) / D
     γ = L * a / D
-    dm = F(m - n)^2; dp = F(m + n)^2
-    c₊ = (L * _gap(l^2 * dm, l^2 - mn + a) + l * _gap(L^2 * dm, L^2 - mn + b)) / D
-    c₋ = -(L * _gap(l^2 * dp, l^2 + mn + a) + l * _gap(L^2 * dp, L^2 + mn + b)) / D
+    dm = F((m - n)^2); dp = F((m + n)^2)
+    c₊ = (L * _gap(l^2 * dm, F(ℓ^2 - m * n) + a) + l * _gap(L^2 * dm, F((ℓ + 1)^2 - m * n) + b)) / D
+    c₋ = -(L * _gap(l^2 * dp, F(ℓ^2 + m * n) + a) + l * _gap(L^2 * dp, F((ℓ + 1)^2 + m * n) + b)) / D
     return (α, β, γ, c₊, c₋)
 end
 
