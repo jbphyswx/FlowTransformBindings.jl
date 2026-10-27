@@ -132,6 +132,69 @@ Test.@testset "NonuniformFFTs oversampled spectra reproduce the returned modes" 
         FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, ns; period = L, origin = o))
 end
 
+# A real field from its packed half and the row `+n₂/2` the modes do not hold, written into the oversampled
+# spectra at `c / Π phis`, against the direct sum: each `k₁ > 0` with its mirror, the `k₁ = 0` row Hermitian.
+Test.@testset "NonuniformFFTs type 2 takes modes written into the oversampled spectra" begin
+    rng = Random.Xoshiro(17)
+    L, o = nu_box(2)
+    xs, ys = nu_nodes(rng, Float64, 90, L, o)
+    ns = (10, 8)
+    h = ns[2] ÷ 2
+    p = FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, ns; order = FTB.FFTModes(), period = L,
+                       origin = o, iflag = -1)
+    ovs(k, n) = k >= 0 ? k + 1 : n + k + 1
+    k1s = 0:(ns[1] ÷ 2)
+    f2 = nu_freqs(FTB.FFTModes(), ns[2])
+    F = FTB.allocate_modes(p)
+    F .= randn(rng, ComplexF64, size(F))
+    for b in 0:(h - 1)
+        F[1, ovs(-b, ns[2])] = b == 0 ? real(F[1, 1]) : conj(F[1, ovs(b, ns[2])])
+    end
+    plus = [randn(rng, ComplexF64) for _ in k1s]
+    plus[1] = conj(F[1, ovs(-h, ns[2])])
+    _, _, phis = FTB.oversampled_spectra(p)
+    jh = FTB.even_table_index(h, ns[2], false)
+    w = FTB.oversampled_type2!(FTB.allocate_values(p), p, F) do us
+        u = first(us)
+        for k1 in k1s
+            u[k1 + 1, ovs(h, size(u, 2))] = plus[k1 + 1] / (phis[1][k1 + 1] * phis[2][jh])
+        end
+    end
+    ref = [sum((k1 == 0 ? 1 : 2) * real(sum(F[k1 + 1, j] * cis(k1 * ys[1][m] + f2[j] * ys[2][m]) for j in eachindex(f2)) +
+                                         plus[k1 + 1] * cis(k1 * ys[1][m] + h * ys[2][m])) for k1 in k1s) for m in eachindex(w)]
+    Test.@test relerr(w, ref) < 10 * FTB.tolerance(p)
+    let q = FTB.plan_nufft(FTB.NonuniformFFTsBackend(), Float64, xs, ns; period = L, origin = o)
+        Test.@test_throws ArgumentError FTB.oversampled_type2!(_ -> nothing, FTB.allocate_values(q), q,
+            FTB.allocate_modes(q))
+    end
+end
+
+# A complex plan's oversampled spectrum holds `+n/2` on an even axis, read from the type 1 and written for
+# the type 2, against the direct sums.
+Test.@testset "NonuniformFFTs complex plans: +n/2 in the oversampled spectrum" begin
+    rng = Random.Xoshiro(18)
+    L, o = nu_box(1)
+    xs, ys = nu_nodes(rng, Float64, 70, L, o)
+    n = 8
+    h = n ÷ 2
+    p = FTB.plan_nufft(FTB.NonuniformFFTsBackend(), ComplexF64, xs, (n,); order = FTB.FFTModes(), period = L,
+                       origin = o, iflag = -1)
+    c = randn(rng, ComplexF64, 70)
+    FTB.nufft_type1!(FTB.allocate_modes(p), p, c)
+    us, nf, phis = FTB.oversampled_spectra(p)
+    jh = FTB.even_table_index(h, n, false)
+    plus = nf * first(us)[h + 1] / phis[1][jh]
+    Test.@test abs(plus - sum(c[m] * cis(-h * ys[1][m]) for m in eachindex(c))) < 10 * FTB.tolerance(p) * sum(abs, c)
+    F = randn(rng, ComplexF64, n)
+    a = randn(rng, ComplexF64)
+    w = FTB.oversampled_type2!(FTB.allocate_values(p), p, F) do us
+        first(us)[h + 1] = a / phis[1][jh]
+    end
+    f = nu_freqs(FTB.FFTModes(), n)
+    ref = [sum(F[j] * cis(f[j] * ys[1][m]) for j in 1:n) + a * cis(h * ys[1][m]) for m in eachindex(w)]
+    Test.@test relerr(w, ref) < 10 * FTB.tolerance(p)
+end
+
 Test.@testset "set_nodes! moves a plan to new nodes: $(nameof(typeof(backend)))" for backend in NU_BACKENDS
     rng = Random.Xoshiro(3)
     L, o = nu_box(2)

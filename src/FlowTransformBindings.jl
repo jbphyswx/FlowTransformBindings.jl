@@ -36,7 +36,7 @@ public FINUFFTBackend, NonuniformFFTsBackend, is_available, has_real_transform
 public AbstractModeOrder, CenteredModes, FFTModes, mode_frequency, AbstractNUFFTPlan, default_tolerance,
        plan_nufft, npoints, nmodes, ntrans, nthreads, tolerance, isclosed, mode_size, mode_frequencies,
        allocate_values, allocate_modes, nufft_type1!, nufft_type2!, set_nodes!, close!, task_local_plan,
-       plan_type, oversampled_spectra
+       plan_type, oversampled_spectra, oversampled_type2!
 public AbstractWavenumberAxis, RFFTAxis, FFTAxis, wavenumber_axes, full_length, full_size, spectral_size,
        packed_size, is_halved, max_abs, is_nyquist, derivative_wavenumber, fold_weight, mode_fold,
        fold_weights, neg_index, box_size, outside_modes, ovs_index, even_table_index,

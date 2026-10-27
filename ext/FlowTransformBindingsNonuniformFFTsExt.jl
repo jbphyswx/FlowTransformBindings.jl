@@ -96,13 +96,41 @@ FTB._type2!(values, p::NonuniformFFTsPlan{T,D,R,B}, modes) where {T,D,R,B} =
 FTB._close!(::NonuniformFFTsPlan) = nothing
 
 # `copy_deconvolve_to_non_oversampled!` writes `normfactor / Π ϕ̂s[d][I_d] · ûs[index_map(I)]`, with
-# `normfactor = Π 2π/Ñ_d` over the oversampled grid `us`.
-function FTB.oversampled_spectra(p::NonuniformFFTsPlan{<:Real})
+# `normfactor = Π 2π/Ñ_d` over the oversampled grid `us`; `output_field` is the real plan's `ûs` and the
+# complex plan's `us`, which its in-place FFT transforms.
+function FTB.oversampled_spectra(p::NonuniformFFTsPlan)
     p.spec.order isa FTB.FFTModes || throw(ArgumentError(
         "oversampled_spectra reads a plan in FFTModes order; this one is in $(nameof(typeof(p.spec.order)))"))
     data = p.plan.data
     normfactor = prod(Ñ -> 2π / Ñ, size(first(data.us)))
-    return data.ûs, normfactor, map(NonuniformFFTs.fourier_coefficients, p.plan.kernels)
+    return NonuniformFFTs.output_field(data), normfactor, map(NonuniformFFTs.fourier_coefficients, p.plan.kernels)
+end
+
+# NonuniformFFTs' `exec_type2!` stage by stage (`NonuniformFFTs.jl`, `exec_type2!`), `write!` on the
+# oversampled spectra between the deconvolution and the backward FFT.
+function FTB.oversampled_type2!(write!::F, values::AbstractArray, p::NonuniformFFTsPlan{T,D,R,B},
+                                modes::AbstractArray) where {F,T,D,R,B}
+    FTB._check_open(p)
+    FTB._check_values(p, values)
+    FTB._check_modes(p, modes)
+    p.spec.order isa FTB.FFTModes || throw(ArgumentError(
+        "oversampled_type2! writes a plan in FFTModes order; this one is in $(nameof(typeof(p.spec.order)))"))
+    plan = p.plan
+    (; backend, points, kernels, data, blocks, index_map) = plan
+    cb = NonuniformFFTs.NUFFTCallbacks()
+    ûs = NonuniformFFTs.output_field(data)
+    NonuniformFFTs.fill_with_zeros!(backend, ûs)
+    NonuniformFFTs.maybe_synchronise(plan)
+    NonuniformFFTs.copy_deconvolve_to_oversampled!(backend, cb.uniform, ûs, _fields(modes, Val(D), Val(B)),
+        index_map, map(NonuniformFFTs.fourier_coefficients, kernels))
+    NonuniformFFTs.maybe_synchronise(plan)
+    write!(ûs)
+    NonuniformFFTs._type2_fft!(data)
+    NonuniformFFTs.maybe_synchronise(plan)
+    NonuniformFFTs.interpolate!(backend, cb.nonuniform, plan.point_transform_fold, blocks, kernels,
+        plan.kernel_evalmode, _fields(values, Val(1), Val(B)), data.us, points)
+    NonuniformFFTs.maybe_synchronise(plan)
+    return values
 end
 
 # `PlanNUFFT` carries the transform count as its type parameter 3, and again inside its data and block

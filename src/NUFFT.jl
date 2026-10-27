@@ -332,9 +332,21 @@ The oversampled type-1 spectra the plan's last execution computed, one per trans
 together with the factors that turn them into the returned modes: the mode at output index `I` is
 `normfactor / Π_d phis[d][I_d]` times the spectrum entry at its frequency. The spectra hold frequencies
 the returned modes do not, such as `+n_d/2` on an even axis. The next execution overwrites them.
-Defined for a NonuniformFFTs plan of real values in `FFTModes` order.
+Defined for a NonuniformFFTs plan in `FFTModes` order; a real plan's spectra are the half `k₁ ≥ 0`.
 """
 function oversampled_spectra end
+
+"""
+    oversampled_type2!(write!, values, plan, modes) -> values
+
+[`nufft_type2!`](@ref) with `write!(spectra)` called on the oversampled spectra, one per transform in FFT
+order, after the modes are deconvolved into them and before the backward FFT. A mode `c` at a frequency
+`k` the modes do not hold, such as `+n_d/2` on an even axis, enters as the entry at `k` set to
+`c / Π_d phis[d][i_d]`, `i_d = even_table_index(k_d, n_d, r2c)` with `r2c` set on axis 1 of a real
+plan, and `phis` those [`oversampled_spectra`](@ref) returns. Defined for a NonuniformFFTs plan in
+`FFTModes` order.
+"""
+function oversampled_type2! end
 
 function Base.show(io::IO, p::AbstractNUFFTPlan{T,D}) where {T,D}
     print(io, nameof(typeof(p)), "{", T, ", ", D, "}(", npoints(p), " points, modes ", nmodes(p),
