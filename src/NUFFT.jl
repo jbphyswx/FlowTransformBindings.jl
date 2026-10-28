@@ -1,6 +1,8 @@
 # A library extension implements, for its backend tag and its plan type:
 #   _allocate_nodes(backend, R, M, like)   a length-`M` node buffer on the device of `like`
 #   _build(backend, T, spec, nodes)        a plan over folded nodes, taking ownership of them
+#   _build(f, backend, T, spec, nodes)     `f` of that plan, called where its type is concrete; needed only
+#                                          by a library whose plan type carries values
 #   _set_nodes!(plan)                      hand `plan.nodes` to the library
 #   _type1!(modes, plan, values), _type2!(values, plan, modes), _close!(plan), _backend(plan)
 # Concrete plans are mutable and hold the fields `spec`, `nodes` and `closed`.
@@ -87,6 +89,7 @@ default_tolerance(::Type{Float32}) = 1.0f-6
     plan_nufft(backend, T, nodes, nmodes; ntrans = 1, tol = default_tolerance(real(T)),
                order = CenteredModes(), period = 2π, origin = 0, nthreads = 1,
                upsampfac = nothing, iflag = -1) -> AbstractNUFFTPlan{T,D}
+    plan_nufft(f, backend, T, nodes, nmodes; kwargs...) -> f(plan)
 
 A plan for the nonuniform FFTs between the `M` points `nodes = (x₁, …, x_D)` and the Fourier modes
 `nmodes = (n₁, …, n_D)`, `ntrans` fields at a time:
@@ -101,19 +104,30 @@ type 2. For real `T`, axis 1 holds `k₁ = 0, …, ⌊n₁/2⌋` ascending and t
 also stands for its conjugate at `-k`; type 1 is then the adjoint under the inner product weighted
 by `w`. `tol` is raised to `eps(real(T))`; `nthreads` is the library's own thread count. Options of
 one library, such as its FFT planner flags, are fields of its `backend`.
+
+A library's plan type may carry values, such as `ntrans` or the kernel width `tol` sets, and is then
+known only once the plan is built. The form taking `f` calls `f(plan)` where that type is concrete, so
+the code in `f` is inferred for it.
 """
-function plan_nufft(backend::SB.AbstractNUFFTSpectralBackend, ::Type{T},
+plan_nufft(backend::SB.AbstractNUFFTSpectralBackend, ::Type{T}, nodes::Tuple, nmodes::Tuple; kwargs...) where {T} =
+    plan_nufft(identity, backend, T, nodes, nmodes; kwargs...)
+
+function plan_nufft(f::F, backend::SB.AbstractNUFFTSpectralBackend, ::Type{T},
                     nodes::NTuple{D,AbstractVector{<:Real}}, nmodes::NTuple{D,Integer};
                     ntrans::Integer = 1, tol::Real = default_tolerance(real(T)),
                     order::AbstractModeOrder = CenteredModes(), period = 2π, origin = 0,
                     nthreads::Integer = 1, upsampfac::Union{Nothing,Real} = nothing,
-                    iflag::Integer = -1) where {T<:_NUFFTEltype, D}
+                    iflag::Integer = -1) where {F, T<:_NUFFTEltype, D}
     spec = _spec(real(T), Val(D), nmodes, order, period, origin, tol, ntrans, nthreads, upsampfac, iflag)
     M = _npoints_of(nodes)
     buf = ntuple(_ -> _allocate_nodes(backend, real(T), M, first(nodes)), Val(D))
     _fold_nodes!(buf, nodes, spec, _node_sign(backend, spec))
-    return _build(backend, T, spec, buf)
+    return _build(f, backend, T, spec, buf)
 end
+
+# A library whose plan type its arguments' types fix applies `f` to the plan it builds.
+_build(f::F, backend::SB.AbstractNUFFTSpectralBackend, ::Type{T}, spec::NUFFTSpec, nodes::Tuple) where {F,T} =
+    f(_build(backend, T, spec, nodes))
 
 """
     _node_sign(backend, spec) -> ±1
@@ -124,7 +138,7 @@ type 1 is fixed at `exp(-i k⋅y)` takes `iflag = +1` as the nodes `-y`, since
 """
 _node_sign(::SB.AbstractNUFFTSpectralBackend, ::NUFFTSpec) = 1
 
-plan_nufft(::SB.AbstractNUFFTSpectralBackend, ::Type{T}, nodes::Tuple, nmodes::Tuple; kwargs...) where {T} =
+plan_nufft(_, ::SB.AbstractNUFFTSpectralBackend, ::Type{T}, nodes::Tuple, nmodes::Tuple; kwargs...) where {T} =
     throw(ArgumentError("plan_nufft takes one of Float32, Float64, ComplexF32, ComplexF64, and as many " *
                         "mode counts as coordinates; got $T with $(length(nodes)) coordinates and " *
                         "$(length(nmodes)) mode counts"))

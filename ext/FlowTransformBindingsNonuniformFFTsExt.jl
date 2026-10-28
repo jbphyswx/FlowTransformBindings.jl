@@ -51,8 +51,12 @@ function _blocked(backend, nthreads::Int)
                         "$(Threads.nthreads()) threads; got nthreads = $nthreads"))
 end
 
-function FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
-                    nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}}
+FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
+           nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}} =
+    FTB._build(identity, tag, T, spec, nodes)
+
+function FTB._build(f::G, tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
+                    nodes::NTuple{D,V}) where {G,T,D,R,V<:AbstractVector{R}}
     backend = _ka_backend(first(nodes))
     backend isa NonuniformFFTs.GPU && FTB._check_device_flags(tag)
     σ = spec.upsampfac === nothing ? _default_upsampfac(spec.tol, spec.nmodes) : spec.upsampfac
@@ -65,17 +69,17 @@ function FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSp
         blocked ? NonuniformFFTs.PlanNUFFT(T, spec.nmodes; kw...) :
                   NonuniformFFTs.PlanNUFFT(T, spec.nmodes; kw..., block_size = nothing)
     end
-    return _wrap(T, spec, tag.fftw_flags, nodes, plan)
+    return _wrap(f, T, spec, tag.fftw_flags, nodes, plan)
 end
 
 _fftw(::Nothing) = (;)
 _fftw(flags::UInt32) = (; fftw_flags = flags)
 
 # `PlanNUFFT`'s type carries the kernel half-width `tol` sets, the transform count and the block layout;
-# the handle is typed by it.
-function _wrap(::Type{T}, spec::FTB.NUFFTSpec{D,R}, flags::F, nodes::NTuple{D,V}, plan::P) where {T,D,R,F,V,P}
+# the handle is typed by it, and `f` runs on the handle with that type known.
+function _wrap(f::G, ::Type{T}, spec::FTB.NUFFTSpec{D,R}, flags::F, nodes::NTuple{D,V}, plan::P) where {G,T,D,R,F,V,P}
     NonuniformFFTs.set_points!(plan, nodes)
-    return NonuniformFFTsPlan{T,D,R,_ntransforms(plan),typeof(spec),F,V,P}(spec, flags, nodes, plan, false)
+    return f(NonuniformFFTsPlan{T,D,R,_ntransforms(plan),typeof(spec),F,V,P}(spec, flags, nodes, plan, false))
 end
 
 _ntransforms(::NonuniformFFTs.PlanNUFFT{Z,N,Nc}) where {Z,N,Nc} = Nc
