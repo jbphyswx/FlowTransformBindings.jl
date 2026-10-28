@@ -52,11 +52,11 @@ function _blocked(backend, nthreads::Int)
 end
 
 FTB._build(tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
-           nodes::NTuple{D,V}) where {T,D,R,V<:AbstractVector{R}} =
+           nodes::NTuple{D,AbstractVector{R}}) where {T,D,R<:AbstractFloat} =
     FTB._build(identity, tag, T, spec, nodes)
 
 function FTB._build(f::G, tag::FTB.NonuniformFFTsBackend, ::Type{T}, spec::FTB.NUFFTSpec{D,R},
-                    nodes::NTuple{D,V}) where {G,T,D,R,V<:AbstractVector{R}}
+                    nodes::NTuple{D,AbstractVector{R}}) where {G,T,D,R<:AbstractFloat}
     backend = _ka_backend(first(nodes))
     backend isa NonuniformFFTs.GPU && FTB._check_device_flags(tag)
     σ = spec.upsampfac === nothing ? _default_upsampfac(spec.tol, spec.nmodes) : spec.upsampfac
@@ -77,9 +77,10 @@ _fftw(flags::UInt32) = (; fftw_flags = flags)
 
 # `PlanNUFFT`'s type carries the kernel half-width `tol` sets, the transform count and the block layout;
 # the handle is typed by it, and `f` runs on the handle with that type known.
-function _wrap(f::G, ::Type{T}, spec::FTB.NUFFTSpec{D,R}, flags::F, nodes::NTuple{D,V}, plan::P) where {G,T,D,R,F,V,P}
+function _wrap(f::G, ::Type{T}, spec::FTB.NUFFTSpec{D,R}, flags::F, nodes::NTuple{D,AbstractVector{R}},
+               plan::P) where {G,T,D,R,F,P}
     NonuniformFFTs.set_points!(plan, nodes)
-    return f(NonuniformFFTsPlan{T,D,R,_ntransforms(plan),typeof(spec),F,V,P}(spec, flags, nodes, plan, false))
+    return f(NonuniformFFTsPlan{T,D,R,_ntransforms(plan),typeof(spec),F,eltype(nodes),P}(spec, flags, nodes, plan, false))
 end
 
 _ntransforms(::NonuniformFFTs.PlanNUFFT{Z,N,Nc}) where {Z,N,Nc} = Nc
@@ -142,9 +143,10 @@ end
 # `NTuple` members from parameter 5 on. Parameter 4 of `RealNUFFTData` is a `D`-tuple of frequencies, an
 # `NTuple` whose length is the dimension, so the rewrite starts at 5.
 _retype_count(@nospecialize(x), old::Int, k::Int) = x
-_retype_count(::Type{NTuple{N,X}}, old::Int, k::Int) where {N,X} = N == old ? NTuple{k,X} : NTuple{N,X}
-_retype_count(::Type{Vector{NTuple{N,X}}}, old::Int, k::Int) where {N,X} =
-    N == old ? Vector{NTuple{k,X}} : Vector{NTuple{N,X}}
+_retype_count(::Type{Tuple{X,Vararg{X,M}}}, old::Int, k::Int) where {X,M} =
+    M + 1 == old ? NTuple{k,X} : Tuple{X,Vararg{X,M}}
+_retype_count(::Type{Vector{Tuple{X,Vararg{X,M}}}}, old::Int, k::Int) where {X,M} =
+    M + 1 == old ? Vector{NTuple{k,X}} : Vector{Tuple{X,Vararg{X,M}}}
 
 function _inner_at_width(@nospecialize(Q::Type), old::Int, k::Int)
     q = collect(Q.parameters)

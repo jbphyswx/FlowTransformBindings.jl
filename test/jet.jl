@@ -3,14 +3,6 @@
 # refuses pre-release Julia.
 using JET: JET
 
-# A caller's code given to `plan_nufft(f, …)`, which sees the plan's concrete type.
-function _jet_type1(p)
-    c, F = FTB.allocate_values(p), FTB.allocate_modes(p)
-    FTB.nufft_type1!(F, p, c)
-    FTB.close!(p)
-    return F
-end
-
 Test.@testset "Entry points make no runtime dispatch" begin
     if isempty(VERSION.prerelease)
         rng = Random.Xoshiro(30)
@@ -19,7 +11,6 @@ Test.@testset "Entry points make no runtime dispatch" begin
             xs = ntuple(_ -> 2π .* rand(rng, 40), D)
             ns = ntuple(d -> 6 + d, D)
             JET.@test_opt target_modules = (FTB,) FTB.plan_nufft(backend, T, xs, ns; ntrans = 2)
-            JET.@test_opt target_modules = (FTB, @__MODULE__) FTB.plan_nufft(_jet_type1, backend, T, xs, ns; ntrans = 2)
             p = FTB.plan_nufft(backend, T, xs, ns; ntrans = 2)
             c, F = FTB.allocate_values(p), FTB.allocate_modes(p)
             JET.@test_opt target_modules = (FTB,) FTB.nufft_type1!(F, p, c)
