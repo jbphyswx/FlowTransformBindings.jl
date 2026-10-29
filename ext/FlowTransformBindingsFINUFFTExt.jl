@@ -25,9 +25,10 @@ mutable struct FINUFFTPlan{T, D, R, S<:FTB.NUFFTSpec{D,R}, F<:Union{Nothing,UInt
     const lock::ReentrantLock
 end
 
-# FINUFFT's destructor takes `lock`, which a finalizer may not wait for. A finalizer destroys a plan's
-# library plans when it acquires the lock at once and otherwise queues them with the lock, one queue per
-# precision, and every call here that takes the lock empties the queues afterwards.
+# FINUFFT's destructor takes `lock`, which a finalizer may not wait for. Each library plan's finalizer
+# destroys it when it acquires the lock at once and otherwise queues it with the lock, one queue per
+# precision, and every call here that takes the lock empties the queues afterwards. `finufft_destroy!`
+# returns at once on a plan already destroyed.
 const _DEFERRED = (Tuple{FINUFFT.finufft_plan{Float64},ReentrantLock}[],
                    Tuple{FINUFFT.finufft_plan{Float32},ReentrantLock}[])
 const _DEFERRED_LOCK = ReentrantLock()
@@ -38,32 +39,34 @@ _queue(::FINUFFT.finufft_plan{Float32}) = _DEFERRED[2]
 function _destroy!(p::FINUFFTPlan)
     FINUFFT.finufft_destroy!(p.type1)
     FINUFFT.finufft_destroy!(p.type2)
-    p.closed = true
     return nothing
 end
 
-function _finalize(p::FINUFFTPlan)
-    p.closed && return nothing
+function _release(h::FINUFFT.finufft_plan, lk::ReentrantLock)
     # A finalizer may not yield, so the queue's lock is spun for; the lock is held only briefly.
     while !trylock(_DEFERRED_LOCK)
         GC.safepoint()
     end
     try
-        if trylock(p.lock)
+        if trylock(lk)
             try
-                _destroy!(p)
+                FINUFFT.finufft_destroy!(h)
             finally
-                unlock(p.lock)
+                unlock(lk)
             end
         else
-            q = _queue(p.type1)
-            push!(q, (p.type1, p.lock))
-            push!(q, (p.type2, p.lock))
+            push!(_queue(h), (h, lk))
         end
     finally
         unlock(_DEFERRED_LOCK)
     end
     return nothing
+end
+
+# The library plan, released by `_release` when collected.
+function _released(h::FINUFFT.finufft_plan, lk::ReentrantLock)
+    finalizer(x -> _release(x, lk), h)
+    return h
 end
 
 function _destroy_deferred()
@@ -101,16 +104,10 @@ function FTB._build(backend::FTB.FINUFFTBackend, ::Type{T}, spec::FTB.NUFFTSpec{
     lk = FINUFFT.finufftlock[]::ReentrantLock
     work = T <: Real ? FTB._half_work(first(nodes), spec) : nothing
     flags = backend.fftw_flags
-    type1 = _makeplan(1, ms, spec.iflag, spec, flags)
-    type2 = try
-        _makeplan(2, ms, -spec.iflag, spec, flags)
-    catch
-        FINUFFT.finufft_destroy!(type1)
-        rethrow()
-    end
+    type1 = _released(_makeplan(1, ms, spec.iflag, spec, flags), lk)
+    type2 = _released(_makeplan(2, ms, -spec.iflag, spec, flags), lk)
     p = FINUFFTPlan{T,D,R,typeof(spec),typeof(flags),typeof(type1),typeof(work)}(
         spec, flags, nodes, type1, type2, work, false, lk)
-    finalizer(_finalize, p)
     _setpts!(p)
     _destroy_deferred()
     return p

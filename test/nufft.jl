@@ -265,22 +265,23 @@ Test.@testset "Plan lifecycle and checks: $(nameof(typeof(backend)))" for backen
     Test.@test_throws ArgumentError FTB.task_local_plan(p)
 end
 
-# A FINUFFT plan left unreachable is destroyed by its finalizer: at once when the lock its C code takes
-# is free, and otherwise queued and destroyed by the next call here that takes the lock.
+# A FINUFFT library plan left unreachable is destroyed by its finalizer: at once when the lock its C code
+# takes is free, and otherwise queued and destroyed by the next call here that takes the lock.
 Test.@testset "FINUFFT plans are freed by collection" begin
     ext = Base.get_extension(FTB, :FlowTransformBindingsFINUFFTExt)
     xs = (rand(Random.Xoshiro(20), 40) .* 2π,)
     destroyed(p) = p.type1.plan_ptr == C_NULL && p.type2.plan_ptr == C_NULL
+    release!(p) = (ext._release(p.type1, p.lock); ext._release(p.type2, p.lock))
     p = FTB.plan_nufft(FTB.FINUFFTBackend(), ComplexF64, xs, (8,))
-    ext._finalize(p)
-    Test.@test FTB.isclosed(p) && destroyed(p)
-    Test.@test FTB.close!(p) === nothing
+    release!(p)
+    Test.@test destroyed(p) && !FTB.isclosed(p)
+    Test.@test FTB.close!(p) === nothing && FTB.isclosed(p)
 
     q = FTB.plan_nufft(FTB.FINUFFTBackend(), Float64, xs, (8,))
     locked, release = Channel{Nothing}(1), Channel{Nothing}(1)
     holder = Threads.@spawn (lock(q.lock); put!(locked, nothing); take!(release); unlock(q.lock))
     take!(locked)
-    ext._finalize(q)
+    release!(q)
     queued = ext._DEFERRED[1]
     Test.@test !destroyed(q) && any(r -> r[1] === q.type1, queued) && any(r -> r[1] === q.type2, queued)
     put!(release, nothing)
